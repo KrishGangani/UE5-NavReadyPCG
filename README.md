@@ -1,49 +1,108 @@
 # P08 · NavReadyPCG: runtime generation that's ready to play
 
+**Author:** Krish Gangani · [github.com/KrishGangani](https://github.com/KrishGangani)
+
 **Domain:** Procedural & runtime generation · navigation · **Difficulty:** ★★★★½ · **Engine:** UE 5.8.4
 
-> **Status: planned; Phases 1–3 (problem analysis, research, architecture) are starting.** The ten projects are developed in parallel, and every Unreal Engine build and benchmark runs one at a time on the same machine, so measurements stay clean. Everything below is the plan. The success criteria are **targets fixed before any code exists, not results**. Real numbers will only come from controlled before/after runs, each traceable to a raw benchmark batch.
+> **Status: in progress. There are no results yet.** Phases 1–4 are done: the problem analysis, the research in the 5.8.4 engine source, the final architecture, and a project skeleton that builds, packages and runs with 0 errors and 0 warnings. The ten portfolio projects are developed in parallel, and every Unreal Engine build and benchmark runs one at a time through a machine-wide queue, so measurements stay clean. The success criteria below are **targets fixed before any pipeline code exists, not results**. Sections marked *(pending)* are filled in only from real measurements, in the phase named.
 
-## The problem
+| Phase | 1 Problem | 2 Research | 3 Architecture | 4 Foundation | 5 Implementation | 6 Explanation | 7 Testing | 8 Profiling | 9 Review | 10 Portfolio |
+|---|---|---|---|---|---|---|---|---|---|---|
+| State | ✓ | ✓ | ✓ final | ✓ | next (S1 of 7) | ongoing | — | — | — | — |
 
-Runtime PCG content isn't coordinated with the navmesh: PCG uses no nav build locks, and procedural instances never affect navigation. So AI path-fails or waits on fresh content, and the PCG budget ignores scheduler time
+---
 
-## Proposed solution
+## Problem statement
 
-A budgeted pipeline: generate → lock navmesh → rebuild dirty areas → mark the cell "AI-ready" → activate AI. Determinism is checked by hashing the generated output
+When runtime PCG fills a region with props that block movement, AI must not path through that region until the navigation mesh has been rebuilt around them. In UE 5.8.4 nothing coordinates the two (verified in the engine source, [01b](Explanation/01b_Research_Findings.md)):
+
+- **Runtime PCG never uses navigation build locks**, or any navigation API: the PCG module doesn't even depend on the navigation system.
+- **CPU-spawned PCG instances do update navigation** when their collision blocks Pawn, on every `AddInstances` call, so the navmesh is rebuilt while a region is still half-generated. (The original plan said "procedural instances never affect navigation"; that is true only for GPU and componentless output, which has no collision or navigation at all.)
+- **The engine's readiness signals are global** (`IsNavigationBuildInProgress`, `OnNavigationGenerationFinished`), so a game can't ask "is *this* region ready?".
+- **The usual workaround has a trap:** releasing a build lock with its default argument calls `RebuildAll()`, which discards and rebuilds the **whole** navmesh.
+- **PCG's frame budget (`pcg.FrameTime`) covers only its graph executor:** the runtime-generation scheduler runs after it and only its cleanup step checks the deadline, and the navigation work the content causes is outside PCG entirely.
+
+The result: agents get paths through rocks the navmesh doesn't know about yet, or wait on unrelated regions. Details: [Explanation/01_Problem_Analysis.md](Explanation/01_Problem_Analysis.md).
+
+## Engineering approach
+
+A per-cell handshake between PCG and navigation: **generate → commit → rebuild → AI-ready → activate AI**.
+
+1. PCG's own runtime scheduler generates each cell, with its props spawned **navigation-invisible** (collision on).
+2. When a cell finishes, NavReady **commits** it to navigation (at most one cell per frame by default), so navigation rebuilds that cell's tiles once, from complete content, without a global lock.
+3. NavReady watches **that cell's** tiles (`FRecastNavMeshGenerator::HasDirtyTiles(CellBounds)`, after at least one navigation tick) until none are pending or running.
+4. It hashes the cell's generated content (a determinism check) and fires the cell's **AI-ready** event; the cell's agents activate only then.
+
+It is compared against four baselines in the same build: uncoordinated (B0), the lock workaround with default arguments (B1), the lock released with `NoRebuild` (B2), and a global readiness gate (B3). Details: [Explanation/02_System_Architecture.md](Explanation/02_System_Architecture.md).
 
 ## Main Unreal Engine technologies
 
-PCG runtime generation (production-ready since 5.7), `AddNavigationBuildLock`/`RemoveNavigationBuildLock`, dynamic navmesh, StateTree AI, hashing
+PCG runtime generation (the framework is Production-Ready since 5.7; this project uses only its CPU path: runtime scheduler, Create Points Grid, Transform Points, Static Mesh Spawner, none of them labelled Beta or Experimental) · `UNavigationSystemV1` dirty areas and build locks · Recast navmesh (`Dynamic`) and its per-area tile query · `UTickableWorldSubsystem`, `UActorComponent`, delegates · CSV profiler, Unreal Insights. The PCG features labelled Beta or Experimental in 5.8 (GPU processing, the GPU spawner, componentless generation, the interop plugins) are listed in [01b §7](Explanation/01b_Research_Findings.md).
+
+## Architecture diagram
+
+Final (v1.0): [Explanation/02_System_Architecture.md](Explanation/02_System_Architecture.md) §5–6 (mermaid), with the cell state machine in §2.
 
 ## Success criteria (targets, defined before implementation)
 
-Time-to-navigable per cell (ms); worst frame during generation; AI path failures per 1,000 requests near fresh content (target 0); determinism hash match rate across runs (target 100%)
+The full table, with exact thresholds, is in [01_Problem_Analysis.md §6.4](Explanation/01_Problem_Analysis.md). In short:
 
-## Existing work it must be compared against
+- **AI never paths through unready content:** 0 path failures per 1,000 requests near fresh content, in every run.
+- **Determinism:** 100% hash match per cell across runs, configurations and builds.
+- **Time-to-navigable per cell** no worse than the uncoordinated default (≤ 1.10× its median), and at most half the default workaround's p95.
+- **Time-to-AI-active** at most half the global gate's median during a burst of generation.
+- **Worst frame during generation** no worse than the uncoordinated default.
+- **Overhead** ≤ 0.05 ms per frame (median).
 
-PCG runtime scheduler, `pcg.FrameTime`, GPU nodes, FastGeo interop; forum nav-lock workaround
+## Before / after comparison
 
-**The gap it targets:** PCG → nav-ready → AI-active orchestration with a budget and determinism checks (gap strength: Medium–Strong).
+*(pending, Phase 8)*. Five configurations on one fixed workload: B0, B1, B2, B3 and NR.
 
-**Main risk:** Dynamic navmesh cost; PCG API churn between versions
+## Benchmark results
+
+*(pending, Phase 8)*. Raw data in [Benchmarks/](Benchmarks/README.md).
+
+## Existing work it is compared against
+
+PCG's runtime generation scheduler and `pcg.FrameTime`; the Dynamic navmesh; navigation build locks and Epic's documented `bInitialBuildingLocked` / `ReleaseInitialBuildingLock()` pattern; `SetRebuildingSuspended`; the engine's global readiness signals; Dynamic Modifiers Only with navigation modifiers; GPU and FastGeo output (no navigation at all); the Epic forum suggestion to lock navigation while PCG runs and rebuild the dirty areas afterwards (a one-line suggestion with no code). Details and sources: [01b §5](Explanation/01b_Research_Findings.md) and [Phase2_Raw_Notes/C_existing_work.md](Explanation/Phase2_Raw_Notes/C_existing_work.md).
+
+**The gap it targets:** a per-region handshake from generated content to AI-ready navigation, with a frame bound and a determinism check, measured against the existing practices. **Gap strength: Medium.** The plan said Medium–Strong; research lowered it, because every building block is a public engine API. The value is in assembling them correctly and measuring honestly.
+
+**Main risks:** Dynamic navmesh cost; PCG API churn between versions (everything is pinned to 5.8.4); a runtime-spawned PCG world actor is unproven until step S1 (fallback: a scripted map).
 
 ## Why studios care
 
-CDPR Expert AI "procedural content generation… systemic open world"; Rockstar "open-world, population and streaming systems"; PCG runtime-cost thread with Epic
+CD PROJEKT RED's AI roles ask for "spawning and systemic open world", "procedural content generation" and "core navigation, pathfinding, and avoidance systems, with a focus on scalability and open world performance"; Rocksteady for "coordinating combat-related and navigation related NPC behaviours"; Rockstar North for "open-world, population and streaming systems". Honest scope: AI and navigation appear in 20 of 57 sampled postings, procedural generation in 1. Sources: [Explanation/Research/01_job_market.md](Explanation/Research/01_job_market.md).
 
-## Method
+## Source code
 
-Every project in the portfolio follows the same ten phases: problem analysis → research → architecture → foundation → implementation → explanation → testing → profiling → review → portfolio. Each phase is documented in `Explanation/` (files 00–12, including a line-by-line code walkthrough), and every claimed improvement must be measured against the existing solutions above on the same workload. Engine: Unreal Engine 5.8.4, C++.
+The UE project is in [NavReadyPCG/](NavReadyPCG/) (UE 5.8.4, C++):
+- the reusable system is the plugin `NavReadyPCGCore`;
+- the workload, baselines and benchmark code are in the game module `NavReadyPCG`.
+
+## Documentation
+
+| File | Contents |
+|---|---|
+| [00_Project_Overview](Explanation/00_Project_Overview.md) | Identity, demonstration, presentation, industry relevance |
+| [01_Problem_Analysis](Explanation/01_Problem_Analysis.md) | Problem, existing work, root-cause hypotheses, workload, configurations, metrics, success criteria, measurement plan |
+| [01b_Research_Findings](Explanation/01b_Research_Findings.md) | Phase 2: verified engine behaviour (UE 5.8.4), the README claims checked, PCG feature maturity, and what it changed in the design |
+| [02_System_Architecture](Explanation/02_System_Architecture.md) | Final v1.0: modules, classes, the cell pipeline, per-frame flow, safety rules, rejected alternatives |
+| [03_Implementation_Roadmap](Explanation/03_Implementation_Roadmap.md) | The small, ordered build steps; baselines captured before the pipeline exists |
+| [04](Explanation/04_CPP_Fundamentals.md) · [05](Explanation/05_Line_By_Line_Code_Explanation.md) · [06](Explanation/06_Unreal_APIs_And_Macros.md) · [07](Explanation/07_Common_Mistakes.md) | C++ fundamentals, line-by-line code, APIs and macros, common mistakes. Written step by step with the code (current to Phase 4) |
+| [09](Explanation/09_Testing_And_Benchmarks.md) | Every check and benchmark batch so far |
+| [08](Explanation/08_Debugging_And_Profiling.md) · [10](Explanation/10_Interview_Questions.md) · [11](Explanation/11_Optimization_Decisions.md) · [12](Explanation/12_Future_Scalability.md) | Debugging and profiling, interview questions, optimisation decisions, future scalability. Filled in during Phases 7–10 |
+| [Phase2_Raw_Notes/](Explanation/Phase2_Raw_Notes/README.md) | The audit trail behind 01b |
+| [Research/](Explanation/Research/) | The portfolio-wide research this project draws on: job market, technical challenges, existing solutions, local engine verification |
 
 ## Folder layout
 
 ```text
 P08_NavReadyPCG\
-├── README.md        ← this page (becomes the project's portfolio page)
-├── Explanation\     ← 00–12, created when the project starts
-├── Benchmarks\      ← Raw\ + Summaries\
+├── README.md        ← this page
+├── Explanation\     ← 00–12, Phase 2 raw notes, research copies
+├── Benchmarks\      ← Raw\ + Summaries\, and the run protocol
 ├── Media\           ← diagrams, screenshots, demo video
-├── Tools\           ← analysis and run scripts
-└── NavReadyPCG\   ← the Unreal Engine project (created in its Phase 4)
+├── Tools\           ← build, package, smoke and check scripts; CPU pinning; (S3) statistics and run scripts
+└── NavReadyPCG\     ← the Unreal Engine project (.uproject, Source, Plugins, Config, Content)
 ```
