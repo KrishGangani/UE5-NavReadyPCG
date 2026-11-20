@@ -106,3 +106,7 @@ P08_NavReadyPCG\
 ├── Tools\           ← build, package, smoke and check scripts; CPU pinning; (S3) statistics and run scripts
 └── NavReadyPCG\     ← the Unreal Engine project (.uproject, Source, Plugins, Config, Content)
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE). Unreal Engine itself is not included and is covered by Epic Games' own license.
