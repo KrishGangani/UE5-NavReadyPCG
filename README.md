@@ -4,11 +4,11 @@
 
 **Domain:** Procedural & runtime generation · navigation · **Difficulty:** ★★★★½ · **Engine:** UE 5.8.4
 
-> **Status: closed early (2026-11-21), by the owner's decision.** Phases 1–4 are done (problem analysis, research in the 5.8.4 engine source, architecture, a skeleton that builds and packages with 0 errors and 0 warnings). Phase 5 delivered the runtime world (S1), the 16-cell workload with a per-cell content hash (S2), the readiness observer and the benchmark harness (S3), and NavReady's commit in its smallest form (configuration `NR`). **What is measured:** determinism (16/16 cells, every run, every build), time to navigable for the uncoordinated default B0, and NavReady's own cost. **What is not:** the AI path checks (no measuring agents) and the B1–B3 baselines were cut, and NR's first runs exposed an engine behaviour (an ISM that already has its instances doesn't dirty the navmesh when made navigation-relevant); the fix is written but **not yet verified by a run**. Details: [09](Explanation/09_Testing_And_Benchmarks.md).
+> **Status: closed early (2026-11-21), by the owner's decision.** Phases 1–4 are done (problem analysis, research in the 5.8.4 engine source, architecture, a skeleton that builds and packages with 0 errors and 0 warnings). Phase 5 delivered the runtime world (S1), the 16-cell workload with a per-cell content hash (S2), the readiness observer and the benchmark harness (S3), and NavReady's commit in its smallest form (configuration `NR`). **What is measured:** determinism (16/16 cells, every run, every build), time to navigable per cell for B0 and NavReady (NR), frame cost and NavReady's own cost, in one short batch. **What is not:** the AI path checks (no measuring agents) and the B1–B3 baselines were cut. Details: [09](Explanation/09_Testing_And_Benchmarks.md).
 
 | Phase | 1 Problem | 2 Research | 3 Architecture | 4 Foundation | 5 Implementation | 6 Explanation | 7 Testing | 8 Profiling | 9 Review | 10 Portfolio |
 |---|---|---|---|---|---|---|---|---|---|---|
-| State | ✓ | ✓ | ✓ final | ✓ | closed early: S1–S3 ✓, S5 minimal (fix unverified), S4/S6/S7 cut | ✓ for the final code | partial | one short batch | — | partial (no video) |
+| State | ✓ | ✓ | ✓ final | ✓ | closed early: S1–S3 ✓, S5 minimal ✓, S4/S6/S7 cut | ✓ for the final code | partial | one short batch | — | partial (no video) |
 
 ---
 
@@ -56,19 +56,24 @@ The full table, with exact thresholds, is in [01_Problem_Analysis.md §6.4](Expl
 
 ## Before / after comparison
 
-Planned: five configurations (B0, B1, B2, B3, NR). Run: **B0 vs NR only**, one short batch, and the NR runs are not valid (their props never reached the navmesh; `09`). So there is **no before/after claim** for readiness, path correctness or frame time.
+Planned: five configurations (B0, B1, B2, B3, NR). Run: **B0 vs NR**, one short batch (2 runs each). NR trades about one frame of readiness for cheaper frames: its cells become navigable **later** (median 36.1 vs 20.4 ms, target not met), while its game-thread p99 is **lower** (2.3 vs 2.8 ms). Path correctness, the reason NR exists, was not measured.
 
 ## Benchmark results
 
-Batch `2026-11-21_111841_final`: packaged Development build, real time capped at 60 fps, RTX 5070 Laptop, 1280×720, pinned to the P-cores (mask 0xFFFF), 2 runs per configuration + priming. Raw data and summary in [Benchmarks/](Benchmarks/README.md).
+Batch `2026-11-21_112845_final`: packaged Development build, real time capped at 60 fps, RTX 5070 Laptop, 1280×720, pinned to the P-cores (mask 0xFFFF), 2 runs per configuration + priming; each value is the median across runs [min–max]. Raw data and summary in [Benchmarks/](Benchmarks/README.md); every number in [09](Explanation/09_Testing_And_Benchmarks.md).
 
-| Measured | Result |
-|---|---|
-| **Determinism (SC2)** | ✅ Same seed → the same content hash in **16/16 cells**, run to run, with and without the GPU, cooked and uncooked, and in B0 and NR; another seed changes 16/16 |
-| **B0 time to navigable per cell (M1)** | median **20.1 ms** [19.7–20.5], p95 **28.5 ms** [25.9–31.2] (generation start → the cell's tiles rebuilt, wall clock) |
-| **NavReady's own cost (SC6)** | median **0.003 ms**, max **0.19–0.33 ms** per frame in all four runs (target: median ≤ 0.05, max ≤ 0.50) ✅ |
-| B0: ready cells re-dirtied by a neighbour's edge props | 32–35 episodes per run: why per-cell readiness must watch neighbours (`12`) |
-| AI path failures (SC1), time to AI-active (SC4), worst frame (SC5), NR's readiness (SC3) | **not measured** |
+| Measured | B0 (uncoordinated) | NR (NavReady) | Criterion |
+|---|---|---|---|
+| Time to navigable per cell (M1), median | **20.4 ms** [19.1–21.8] | **36.1 ms** [34.4–37.9] | SC3 ≤ 1.10 × B0: ❌ not met |
+| M1 p95 | 30.1 ms [25.7–34.5] | 41.1 ms [40.2–42.1] | SC3 ≤ B0: ❌ not met |
+| `GameThreadTime` p99 | 2.8 ms [2.4–3.2] | **2.3 ms** [2.3–2.3] | lower in NR |
+| NavReady's own cost per frame | median 0.003 ms, max ≤ 0.45 ms | median 0.003 ms, max ≤ 0.44 ms | SC6: ✅ met |
+| Same content hash per cell (seed 1) | 16/16 | 16/16, identical to B0 | SC2: ✅ met |
+| AI path failures, time to AI-active, clean worst frame | not measured | not measured | SC1, SC4, SC5 |
+
+Why NR is slower to navigable (inferred, `09`): B0's props dirty their tiles while PCG spawns them; NR commits a cell in the NavReady tick after it is generated and, in a burst, one cell per frame, which costs about one frame at 60 fps.
+
+**Engine finding on the way:** making an instanced static mesh that already has its instances navigation-relevant (`SetCanEverAffectNavigation(true)`) registers it **without dirtying its area**, because ISMs expect per-instance updates (`InstancedStaticMesh.cpp:5513–5519`). The first NR runs had no props in the navmesh at all; NavReady now marks the area itself (`AddDirtyArea`).
 
 ![B0: generation start to navigation-ready, per cell](Media/b0_time_to_navigable.svg)
 

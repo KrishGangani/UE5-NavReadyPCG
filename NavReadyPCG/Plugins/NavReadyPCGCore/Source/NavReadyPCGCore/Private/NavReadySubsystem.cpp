@@ -209,7 +209,7 @@ void UNavReadySubsystem::Tick(float DeltaTime)
 					// Registering an ISM that already has its instances does not dirty its area: ISMs opt out of the
 					// dirty area on add, expecting per-instance updates (InstancedStaticMesh.cpp:5513-5519,
 					// NavigationDataHandler.cpp:50). Found in the final batch: NR's props never blocked. So the commit
-					// dirties the component's bounds itself. [not yet verified by a run]
+					// dirties the component's bounds itself. Verified: job 20261121_112721_9a0628, 16/16 cells block.
 					NavSys->AddDirtyArea(Instances->Bounds.GetBox(), ENavigationDirtyFlag::All, TEXT("NavReadyCommit"));
 				}
 			}

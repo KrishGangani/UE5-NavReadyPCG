@@ -11,7 +11,7 @@
 
 ---
 
-**Progress (2026-11-21):** Phase 4 ✅ (F1–F3, checks F-1 to F-6 in `09`). S1 ✅ (checks S1-a to S1-e in `09`). S2 ✅ (checks S2-a to S2-j in `09`). S3 ✅ (built, tested and run in the final job). **Closed early by the owner (2026-11-21):** S5 done in its smallest form (commit, hash, `NR`); S4's agents and baselines B1–B3, S6 and S7 not done. The last fix (the commit's `AddDirtyArea`) is not yet verified by a run (`09`).
+**Progress (2026-11-21):** Phase 4 ✅ (F1–F3, checks F-1 to F-6 in `09`). S1 ✅ (checks S1-a to S1-e in `09`). S2 ✅ (checks S2-a to S2-j in `09`). S3 ✅ (built, tested and run in the final job). **Closed early by the owner (2026-11-21):** S5 done in its smallest form (commit, hash, `NR`); S4's agents and baselines B1–B3, S6 and S7 not done. The last fix (the commit's `AddDirtyArea`) was verified by the NR batch (`09`).
 
 ## Phase 4: Foundation (no gameplay code yet) ✅
 

@@ -210,7 +210,7 @@ All runs: `Tools\s3_checks.bat` through the queue (build both targets → every 
 | Job | Result | What it showed |
 |---|---|---|
 | `20261121_111500_859557` | ❌ exit 2, 116.7 s | Builds ✅ (0 errors, 0 warnings); **9 of 9 automation tests pass** (5 hash + 4 cell); package ✅ (cook 0 errors / 0 warnings). The batch didn't start: an unquoted `B0,NR` was split by cmd at the comma (`07`) |
-| `20261121_111727_dfe693` | ❌ exit 1 | Builds, 9/9 tests and package ✅ again. Batch `2026-11-21_111841_final`: **B0 ✅ in both runs; NR ❌ in both runs**: every cell generated and was hashed (the hash at AI-ready matched the generated content in 16/16 cells), but **0 of 16 cells had props that block navigation**: switching an already populated ISM to navigation-relevant registers it without dirtying its area (`06` §30). Fix written (the commit calls `AddDirtyArea`), **not verified**: the owner's limit of two jobs was reached |
+| `20261121_111727_dfe693` | ❌ exit 1 | Builds, 9/9 tests and package ✅ again. Batch `2026-11-21_111841_final`: **B0 ✅ in both runs; NR ❌ in both runs**: every cell generated and was hashed (the hash at AI-ready matched the generated content in 16/16 cells), but **0 of 16 cells had props that block navigation**: switching an already populated ISM to navigation-relevant registers it without dirtying its area (`06` §30). Fix written: the commit calls `AddDirtyArea`; verified below |
 
 **The batch** (pinned 0xFFFF, real time at 60 fps, RTX 5070 Laptop, 1280×720; raw files `Benchmarks/Raw/2026-11-21_111841_final_*`, summary `Benchmarks/Summaries/2026-11-21_111841_final_summary.md`):
 
@@ -225,14 +225,37 @@ All runs: `Tools\s3_checks.bat` through the queue (build both targets → every 
 | Ready cells re-dirtied by a neighbour's edge props | 32 and 35 episodes per run | 0 (invalid) |
 | Content hash | identical in every run (`0x8CEE4992`) | identical to B0 (`0x8CEE4992`): the navigation flag doesn't change the content |
 
+### Verification of the fix (one more job, on the coordinator's request)
+
+| Job | Result | What it showed |
+|---|---|---|
+| `20261121_112413_1c329d` | ⚠ exit 143, **not a test result** | Builds, 9/9 tests, package and the first two B0 runs passed; then my own shell's 175 s timeout killed the queue client, and the queue stopped the job during the first NR run. Re-run unchanged |
+| `20261121_112721_9a0628` | ✅ exit 0 | Builds 0 errors / 0 warnings; **9/9 tests**; package 0 / 0; batch `2026-11-21_112845_final`: **all 5 runs pass, NR included**: in both NR runs 16/16 cells have props that block the navmesh, 16/16 reach ready, and NavReady's hash at ready matches the generated content in 16/16 cells |
+
+**The batch** (pinned 0xFFFF, real time at 60 fps, RTX 5070 Laptop, 1280×720; raw `Benchmarks/Raw/2026-11-21_112845_final_*`, summary `Benchmarks/Summaries/2026-11-21_112845_final_summary.md`). Each value: median across the 2 runs [min–max]:
+
+| Metric | B0 | NR |
+|---|---|---|
+| M1 time to navigable per cell, median | **20.4 ms** [19.1–21.8] | **36.1 ms** [34.4–37.9] |
+| M1 p95 | 30.1 ms [25.7–34.5] | 41.1 ms [40.2–42.1] |
+| Settle (generated → ready), median | 12.7 ms [11.4–14.0] | 28.3 ms [27.3–29.2] |
+| `GameThreadTime` p99 | 2.8 ms [2.4–3.2] | **2.3 ms** [2.3–2.3] |
+| `GameThreadTime` max | 243 ms (includes the end-of-run pocket check, ≈ 0.2 s, inside the capture) | 253 ms (same) |
+| `Exclusive/GameThread/NavigationBuild` max | 3.9–4.7 ms | 2.6–2.9 ms |
+| NavReady's own cost | median 0.0024–0.0027 ms, max 0.31–0.45 ms | median 0.0025–0.0027 ms, max 0.30–0.44 ms |
+| Ready cells re-dirtied by a neighbour's edge props | 32, 35 | 38, 38 |
+| Content hash (seed 1) | `0x8CEE4992` | `0x8CEE4992` |
+
+**Reading it honestly.** NR is **slower** to navigable: about +16 ms per cell at the median. That is about one frame at 60 fps (16.7 ms), which fits NR's design **[inferred]**: B0's props dirty their tiles while PCG spawns them, but NR's commit runs in the NavReady tick after the "generated" event, the dirty areas are flushed on a later navigation tick, and in a burst the one-cell-per-frame budget queues cells. In exchange, NR's frames were cheaper: game-thread p99 2.3 ms vs 2.8 ms with non-overlapping run ranges, and a lower navigation-build peak. That is what one rebuild per cell instead of incremental rebuilds during generation would give **[inferred]**. With 2 runs per configuration this is a first reading, not a verdict.
+
 ## Success criteria: what the data shows
 
 | # | Criterion | Status |
 |---|---|---|
 | SC1 | AI never paths through unready content | **not measured** (no measuring agents) |
-| SC2 | Determinism | ✅ **met** for what was run: same seed → same hash in 16/16 cells across runs, GPU and no GPU, cooked and uncooked (`09` S2), and across B0 and NR (final batch); another seed changes 16/16 |
-| SC3 | Readiness not slower than B0 | **not measured** (NR's readiness was invalid: its props never reached the navmesh) |
+| SC2 | Determinism | ✅ **met** for what was run: same seed → same hash in 16/16 cells across runs, GPU and no GPU, cooked and uncooked (S2), and in B0 and NR; another seed changes 16/16; NavReady's hash at ready = the generated content in 16/16 cells |
+| SC3 | NR median M1 ≤ 1.10 × B0, NR p95 ≤ B0 p95 | ❌ **not met**: 36.1 vs 20.4 ms median (1.77×), 41.1 vs 30.1 ms p95. The B1 part was not measured |
 | SC4 | AI activates promptly | **not measured** |
-| SC5 | No worse worst frame | **not measured** cleanly (the pocket check is inside the capture; NR's navmesh work was missing) |
-| SC6 | Low overhead (median ≤ 0.05 ms, max ≤ 0.50 ms per frame) | ✅ **met** in all four runs: median 0.003 ms, max 0.19–0.33 ms (in NR the commit itself was cheaper than it will be with the fix) |
-| SC7 | Robust | partly: 16/16 cells reached ready in every run; the edge-case tests were not written |
+| SC5 | No worse worst frame | **not measured** cleanly: the max frame of both is the pocket check. p99 `GameThreadTime` is lower in NR (2.3 vs 2.8 ms, ranges don't overlap) |
+| SC6 | NavReady median ≤ 0.05 ms, max ≤ 0.50 ms per frame | ✅ **met** in all runs: median ≤ 0.003 ms, max ≤ 0.45 ms |
+| SC7 | Robust | partly: 16/16 cells reached ready in every run of both configurations; the edge-case tests were not written |

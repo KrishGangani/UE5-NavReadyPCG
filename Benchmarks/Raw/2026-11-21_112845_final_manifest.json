@@ -1,0 +1,458 @@
+{
+  "environment": {
+    "date": "2026-11-21T11:28:45",
+    "engine": "5.8.4 (CL 58902052)",
+    "build_config": "Development (packaged)",
+    "cpu": "Intel(R) Core(TM) i7-14650HX",
+    "gpus": "Intel(R) UHD Graphics (driver 32.0.101.7088); NVIDIA GeForce RTX 5070 Laptop GPU (driver 32.0.16.1047)",
+    "ram_gb": "31.6",
+    "os": "Microsoft Windows 11 Home Single Language build 26200",
+    "power_plan": "Power Scheme GUID: 6fecc5ae-f350-48a5-b669-b472cb895ccf  (Turbo)",
+    "on_ac_power": true,
+    "resolution": "1280x720 windowed, default scalability",
+    "common_args": "-windowed -ResX=1280 -ResY=720 -nosound -unattended -traceautostart=0 -novsync -ini:Engine:[ConsoleVariables]:t.MaxFPS=60 -NRRun -NRExit -csvStartOnEvent=BenchStart -csvStopOnEvent=BenchEnd",
+    "cpu_affinity": "0xFFFF (performance cores only; hybrid CPU)"
+  },
+  "runs": [
+    {
+      "name": "2026-11-21_112845_final_B0_r0_prime",
+      "config": "B0",
+      "run": 0,
+      "priming": true,
+      "seed": 1,
+      "cells_requested": 16,
+      "exit_code": 0,
+      "wall_seconds": 26.1,
+      "command": "\"D:\\UNREAL PORTFOLIO\\P08_NavReadyPCG\\Build\\Windows\\NavReadyPCG\\Binaries\\Win64\\NavReadyPCG.exe\" -windowed -ResX=1280 -ResY=720 -nosound -unattended -traceautostart=0 -novsync -ini:Engine:[ConsoleVariables]:t.MaxFPS=60 -NRRun -NRExit -csvStartOnEvent=BenchStart -csvStopOnEvent=BenchEnd -NRSeed=1 -NRCells=16 -NRRunTag=2026-11-21_112845_final_B0_r0_prime -NRConfig=B0",
+      "capture": "2026-11-21_112845_final_B0_r0_prime.csv",
+      "stats": {
+        "GameThreadTime": {
+          "n": 6793,
+          "mean": 1.4503736199028412,
+          "min": 0.8846,
+          "median": 1.2894,
+          "p95": 2.143279999999999,
+          "p99": 3.343304,
+          "max": 216.595
+        },
+        "FrameTime": {
+          "n": 6793,
+          "mean": 3.106424863830414,
+          "min": 1.1957,
+          "median": 2.9927,
+          "p95": 4.108359999999999,
+          "p99": 5.051076,
+          "max": 9.2974
+        },
+        "Exclusive/GameThread/Tickables": {
+          "n": 6793,
+          "mean": 0.10479867510672751,
+          "min": 0.0536,
+          "median": 0.0828,
+          "p95": 0.19873999999999994,
+          "p99": 0.40676799999999963,
+          "max": 4.1714
+        },
+        "Exclusive/GameThread/NavigationBuild": {
+          "n": 6793,
+          "mean": 0.017787590166347712,
+          "min": 0.0058,
+          "median": 0.0086,
+          "p95": 0.03287999999999993,
+          "p99": 0.12436399999999993,
+          "max": 3.812
+        },
+        "Exclusive/GameThread/NavReady": {
+          "n": 6793,
+          "mean": 0.003327071985867805,
+          "min": 0.0015,
+          "median": 0.0025,
+          "p95": 0.0042,
+          "p99": 0.026139999999999965,
+          "max": 0.2874
+        }
+      },
+      "finalised": true,
+      "frames": 6793,
+      "frames_over_33ms": 1,
+      "cells_report": "2026-11-21_112845_final_B0_r0_prime_cells.csv",
+      "cells": {
+        "cells": 16,
+        "cells_ready": 16,
+        "dirtied_while_ready": 32,
+        "m1_ms": {
+          "n": 16,
+          "mean": 19.80543750000005,
+          "min": 14.54299999999975,
+          "median": 19.947499999999785,
+          "p95": 24.35199999999993,
+          "p99": 24.356799999999534,
+          "max": 24.357999999999436
+        },
+        "settle_ms": {
+          "n": 16,
+          "mean": 12.00393750000009,
+          "min": 7.958000000000354,
+          "median": 11.68099999999761,
+          "p95": 16.364749999999262,
+          "p99": 17.321750000000335,
+          "max": 17.561000000000604
+        }
+      },
+      "log_errors": 0,
+      "log_warnings": 0
+    },
+    {
+      "name": "2026-11-21_112845_final_B0_r1",
+      "config": "B0",
+      "run": 1,
+      "priming": false,
+      "seed": 1,
+      "cells_requested": 16,
+      "exit_code": 0,
+      "wall_seconds": 25.3,
+      "command": "\"D:\\UNREAL PORTFOLIO\\P08_NavReadyPCG\\Build\\Windows\\NavReadyPCG\\Binaries\\Win64\\NavReadyPCG.exe\" -windowed -ResX=1280 -ResY=720 -nosound -unattended -traceautostart=0 -novsync -ini:Engine:[ConsoleVariables]:t.MaxFPS=60 -NRRun -NRExit -csvStartOnEvent=BenchStart -csvStopOnEvent=BenchEnd -NRSeed=1 -NRCells=16 -NRRunTag=2026-11-21_112845_final_B0_r1 -NRConfig=B0",
+      "capture": "2026-11-21_112845_final_B0_r1.csv",
+      "stats": {
+        "GameThreadTime": {
+          "n": 6455,
+          "mean": 1.4710262896979087,
+          "min": 0.9072,
+          "median": 1.3337,
+          "p95": 1.97693,
+          "p99": 3.190624,
+          "max": 232.897
+        },
+        "FrameTime": {
+          "n": 6455,
+          "mean": 3.2693776142525177,
+          "min": 1.3824,
+          "median": 3.2147,
+          "p95": 3.9795899999999995,
+          "p99": 4.920964000000001,
+          "max": 9.0962
+        },
+        "Exclusive/GameThread/Tickables": {
+          "n": 6455,
+          "mean": 0.10888749806351665,
+          "min": 0.0557,
+          "median": 0.0855,
+          "p95": 0.2187,
+          "p99": 0.40874600000000016,
+          "max": 3.8979
+        },
+        "Exclusive/GameThread/NavigationBuild": {
+          "n": 6455,
+          "mean": 0.017365050348567,
+          "min": 0.0056,
+          "median": 0.0086,
+          "p95": 0.020759999999999855,
+          "p99": 0.11080600000000004,
+          "max": 3.848
+        },
+        "Exclusive/GameThread/NavReady": {
+          "n": 6455,
+          "mean": 0.003537939581719597,
+          "min": 0.0015,
+          "median": 0.0024,
+          "p95": 0.0038,
+          "p99": 0.034830000000000014,
+          "max": 0.3059
+        }
+      },
+      "finalised": true,
+      "frames": 6455,
+      "frames_over_33ms": 1,
+      "cells_report": "2026-11-21_112845_final_B0_r1_cells.csv",
+      "cells": {
+        "cells": 16,
+        "cells_ready": 16,
+        "dirtied_while_ready": 32,
+        "m1_ms": {
+          "n": 16,
+          "mean": 19.787812499999475,
+          "min": 15.761999999998721,
+          "median": 19.102000000000174,
+          "p95": 25.67200000000014,
+          "p99": 25.688800000000356,
+          "max": 25.69300000000041
+        },
+        "settle_ms": {
+          "n": 16,
+          "mean": 12.145187499999766,
+          "min": 9.292999999999552,
+          "median": 11.350999999999445,
+          "p95": 17.77300000000226,
+          "p99": 18.740199999999962,
+          "max": 18.98199999999939
+        }
+      },
+      "log_errors": 0,
+      "log_warnings": 0
+    },
+    {
+      "name": "2026-11-21_112845_final_NR_r1",
+      "config": "NR",
+      "run": 1,
+      "priming": false,
+      "seed": 1,
+      "cells_requested": 16,
+      "exit_code": 0,
+      "wall_seconds": 24.3,
+      "command": "\"D:\\UNREAL PORTFOLIO\\P08_NavReadyPCG\\Build\\Windows\\NavReadyPCG\\Binaries\\Win64\\NavReadyPCG.exe\" -windowed -ResX=1280 -ResY=720 -nosound -unattended -traceautostart=0 -novsync -ini:Engine:[ConsoleVariables]:t.MaxFPS=60 -NRRun -NRExit -csvStartOnEvent=BenchStart -csvStopOnEvent=BenchEnd -NRSeed=1 -NRCells=16 -NRRunTag=2026-11-21_112845_final_NR_r1 -NRConfig=NR",
+      "capture": "2026-11-21_112845_final_NR_r1.csv",
+      "stats": {
+        "GameThreadTime": {
+          "n": 6179,
+          "mean": 1.4514363974753195,
+          "min": 0.9031,
+          "median": 1.3405,
+          "p95": 1.9005299999999998,
+          "p99": 2.277300000000004,
+          "max": 241.1987
+        },
+        "FrameTime": {
+          "n": 6179,
+          "mean": 3.4151168797540055,
+          "min": 1.0891,
+          "median": 3.394,
+          "p95": 4.1078,
+          "p99": 4.46335,
+          "max": 8.6249
+        },
+        "Exclusive/GameThread/Tickables": {
+          "n": 6179,
+          "mean": 0.10855528402654151,
+          "min": 0.0589,
+          "median": 0.0845,
+          "p95": 0.23091999999999988,
+          "p99": 0.4229740000000004,
+          "max": 4.7808
+        },
+        "Exclusive/GameThread/NavigationBuild": {
+          "n": 6179,
+          "mean": 0.016439391487295677,
+          "min": 0.0061,
+          "median": 0.0086,
+          "p95": 0.012909999999999946,
+          "p99": 0.09038800000000011,
+          "max": 2.8465
+        },
+        "Exclusive/GameThread/NavReady": {
+          "n": 6179,
+          "mean": 0.003407412202621784,
+          "min": 0.0017,
+          "median": 0.0025,
+          "p95": 0.0038,
+          "p99": 0.031422000000000026,
+          "max": 0.2962
+        }
+      },
+      "finalised": true,
+      "frames": 6179,
+      "frames_over_33ms": 1,
+      "cells_report": "2026-11-21_112845_final_NR_r1_cells.csv",
+      "cells": {
+        "cells": 16,
+        "cells_ready": 16,
+        "dirtied_while_ready": 38,
+        "m1_ms": {
+          "n": 16,
+          "mean": 34.733437499999795,
+          "min": 28.29700000000024,
+          "median": 34.35649999999857,
+          "p95": 40.17850000000234,
+          "p99": 40.18450000000211,
+          "max": 40.18600000000205
+        },
+        "settle_ms": {
+          "n": 16,
+          "mean": 26.856374999999794,
+          "min": 21.444999999999936,
+          "median": 27.27149999999945,
+          "p95": 31.05949999999824,
+          "p99": 31.744700000000226,
+          "max": 31.91600000000072
+        }
+      },
+      "log_errors": 0,
+      "log_warnings": 0
+    },
+    {
+      "name": "2026-11-21_112845_final_NR_r2",
+      "config": "NR",
+      "run": 2,
+      "priming": false,
+      "seed": 1,
+      "cells_requested": 16,
+      "exit_code": 0,
+      "wall_seconds": 25.4,
+      "command": "\"D:\\UNREAL PORTFOLIO\\P08_NavReadyPCG\\Build\\Windows\\NavReadyPCG\\Binaries\\Win64\\NavReadyPCG.exe\" -windowed -ResX=1280 -ResY=720 -nosound -unattended -traceautostart=0 -novsync -ini:Engine:[ConsoleVariables]:t.MaxFPS=60 -NRRun -NRExit -csvStartOnEvent=BenchStart -csvStopOnEvent=BenchEnd -NRSeed=1 -NRCells=16 -NRRunTag=2026-11-21_112845_final_NR_r2 -NRConfig=NR",
+      "capture": "2026-11-21_112845_final_NR_r2.csv",
+      "stats": {
+        "GameThreadTime": {
+          "n": 5946,
+          "mean": 1.5141074672048436,
+          "min": 1.0102,
+          "median": 1.3918,
+          "p95": 1.961675,
+          "p99": 2.2932600000000045,
+          "max": 265.1131
+        },
+        "FrameTime": {
+          "n": 5946,
+          "mean": 3.550109687184662,
+          "min": 1.5113,
+          "median": 3.53465,
+          "p95": 4.284224999999999,
+          "p99": 4.60381,
+          "max": 8.1291
+        },
+        "Exclusive/GameThread/Tickables": {
+          "n": 5946,
+          "mean": 0.11544243188698285,
+          "min": 0.0588,
+          "median": 0.0932,
+          "p95": 0.215675,
+          "p99": 0.42654000000000014,
+          "max": 4.5398
+        },
+        "Exclusive/GameThread/NavigationBuild": {
+          "n": 5946,
+          "mean": 0.018524823410696268,
+          "min": 0.0066,
+          "median": 0.0099,
+          "p95": 0.0144,
+          "p99": 0.10034500000000035,
+          "max": 2.6445
+        },
+        "Exclusive/GameThread/NavReady": {
+          "n": 5946,
+          "mean": 0.0037049276824756136,
+          "min": 0.0018,
+          "median": 0.0027,
+          "p95": 0.0044,
+          "p99": 0.032285000000000126,
+          "max": 0.4415
+        }
+      },
+      "finalised": true,
+      "frames": 5946,
+      "frames_over_33ms": 1,
+      "cells_report": "2026-11-21_112845_final_NR_r2_cells.csv",
+      "cells": {
+        "cells": 16,
+        "cells_ready": 16,
+        "dirtied_while_ready": 38,
+        "m1_ms": {
+          "n": 16,
+          "mean": 37.51606249999973,
+          "min": 31.278999999999613,
+          "median": 37.86049999999985,
+          "p95": 42.09299999999949,
+          "p99": 45.55619999999969,
+          "max": 46.42199999999974
+        },
+        "settle_ms": {
+          "n": 16,
+          "mean": 28.321062499999716,
+          "min": 23.623999999999867,
+          "median": 29.237000000001068,
+          "p95": 32.91374999999918,
+          "p99": 33.196349999998716,
+          "max": 33.2669999999986
+        }
+      },
+      "log_errors": 0,
+      "log_warnings": 0
+    },
+    {
+      "name": "2026-11-21_112845_final_B0_r2",
+      "config": "B0",
+      "run": 2,
+      "priming": false,
+      "seed": 1,
+      "cells_requested": 16,
+      "exit_code": 0,
+      "wall_seconds": 25.6,
+      "command": "\"D:\\UNREAL PORTFOLIO\\P08_NavReadyPCG\\Build\\Windows\\NavReadyPCG\\Binaries\\Win64\\NavReadyPCG.exe\" -windowed -ResX=1280 -ResY=720 -nosound -unattended -traceautostart=0 -novsync -ini:Engine:[ConsoleVariables]:t.MaxFPS=60 -NRRun -NRExit -csvStartOnEvent=BenchStart -csvStopOnEvent=BenchEnd -NRSeed=1 -NRCells=16 -NRRunTag=2026-11-21_112845_final_B0_r2 -NRConfig=B0",
+      "capture": "2026-11-21_112845_final_B0_r2.csv",
+      "stats": {
+        "GameThreadTime": {
+          "n": 5757,
+          "mean": 1.5210544380753865,
+          "min": 0.9804,
+          "median": 1.4026,
+          "p95": 1.9781,
+          "p99": 2.436923999999993,
+          "max": 253.0059
+        },
+        "FrameTime": {
+          "n": 5757,
+          "mean": 3.6655317700191072,
+          "min": 1.9166,
+          "median": 3.6148,
+          "p95": 4.43106,
+          "p99": 4.881327999999997,
+          "max": 10.8905
+        },
+        "Exclusive/GameThread/Tickables": {
+          "n": 5757,
+          "mean": 0.11823140524578774,
+          "min": 0.0628,
+          "median": 0.0952,
+          "p95": 0.22547999999999993,
+          "p99": 0.4507639999999998,
+          "max": 4.8798
+        },
+        "Exclusive/GameThread/NavigationBuild": {
+          "n": 5757,
+          "mean": 0.018524526663192636,
+          "min": 0.0067,
+          "median": 0.0101,
+          "p95": 0.0144,
+          "p99": 0.05405199999999968,
+          "max": 4.7221
+        },
+        "Exclusive/GameThread/NavReady": {
+          "n": 5757,
+          "mean": 0.0036484280006948066,
+          "min": 0.0016,
+          "median": 0.0027,
+          "p95": 0.004319999999999982,
+          "p99": 0.03308799999999992,
+          "max": 0.448
+        }
+      },
+      "finalised": true,
+      "frames": 5757,
+      "frames_over_33ms": 1,
+      "cells_report": "2026-11-21_112845_final_B0_r2_cells.csv",
+      "cells": {
+        "cells": 16,
+        "cells_ready": 16,
+        "dirtied_while_ready": 35,
+        "m1_ms": {
+          "n": 16,
+          "mean": 23.552874999999666,
+          "min": 18.21299999999937,
+          "median": 21.774500000000472,
+          "p95": 34.53499999999998,
+          "p99": 34.53980000000065,
+          "max": 34.54100000000082
+        },
+        "settle_ms": {
+          "n": 16,
+          "mean": 14.9770624999995,
+          "min": 10.293999999998249,
+          "median": 14.021499999999465,
+          "p95": 20.82250000000041,
+          "p99": 20.8453000000004,
+          "max": 20.851000000000397
+        }
+      },
+      "log_errors": 0,
+      "log_warnings": 0
+    }
+  ]
+}

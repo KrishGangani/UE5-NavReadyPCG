@@ -2,7 +2,7 @@
 
 Every number in this project's write-up must trace back to a file in this folder. The method is in [../Explanation/01_Problem_Analysis.md §7](../Explanation/01_Problem_Analysis.md). The results, batch by batch, are in [../Explanation/09_Testing_And_Benchmarks.md](../Explanation/09_Testing_And_Benchmarks.md).
 
-**Status (2026-11-21):** one short batch, `2026-11-21_111841_final` (B0 vs NR, 2 runs each + priming). The project was closed early: no full baseline capture.
+**Status (2026-11-21):** two short batches of B0 vs NR (2 runs each + priming); the second, `2026-11-21_112845_final`, is the valid one. The project was closed early: no full baseline capture.
 
 ## Measurement rules
 
@@ -60,3 +60,4 @@ Warm-up excluded:  until BenchStart (camera at the start of its path)    Capture
 | Batch | Configs | Runs | Purpose | Summary |
 |---|---|---|---|---|
 | `2026-11-21_111841_final` | B0, NR | 2 + priming | The owner's single short comparison | [summary](Summaries/2026-11-21_111841_final_summary.md); NR runs failed (props never reached the navmesh, `09`) |
+| `2026-11-21_112845_final` | B0, NR | 2 + priming | The same, after the commit fix: **all runs valid** | [summary](Summaries/2026-11-21_112845_final_summary.md) |
