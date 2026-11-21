@@ -30,6 +30,23 @@
 | Leaving a runtime component's generation radius at the default | Every cell generates at once: the default `RadiusUnbounded` is `(1u << 31) × 2` cm | `bOverrideGenerationRadii = true` and a real radius (`05` B2) |
 | Expecting runtime generation in a map without a saved PCG world actor | Nothing generates; the scheduler only ticks `if (PCGWorldActor)` | Spawn an `APCGWorldActor` at runtime (`05` B3) |
 
+## Content, hashing and layout (S2)
+
+| Mistake | How to spot it | How to prevent it |
+|---|---|---|
+| Taking `TileSizeUU` (1000) as the navmesh tile size | Cells planned as "3 × 3 tiles of 10 m" straddle tile edges; per-cell tile counts don't add up | The real tile is `TruncToInt(TileSizeUU / CellSize) × CellSize` = 988 cm with the defaults (`ARecastNavMesh::GetTileSizeUU`). Lay cells out from that value and check it against the live navmesh (`05` C4) |
+| Putting a cell edge on the Volume Sampler's lattice | Two overlapping props on the shared edge, one from each cell; more instances than the lattice predicts | The lattice is world-aligned (multiples of the voxel size), so keep every cell edge off it; S2's first layout had the edge y = 0 on it (`05` C3, C4) |
+| `FCrc::StrCrc32(View.GetData(), View.Len())` | Compiles; the hash changes with unrelated memory after the view | The second parameter is a seed. Use `StrCrc32Len(Data, Length)` (`06` §17) |
+| Hashing a struct's raw memory | Equal values hash differently between runs or builds | Padding bytes are undefined. Hash an array of one type, or each member (`04` §16) |
+| Hashing PCG content in generation order | The hash changes between runs although the content didn't, if instances come out in another order (H6) | Sort per-instance hashes before combining; keep the ordered hash only as a report (`05` C1) |
+| `TestEqual(TEXT("…"), A, B)` with two `uint32` | A compile error: the call is ambiguous between the `int32`, `int64`, `SIZE_T`, `float` and `double` overloads (`AutomationTest.h:1985–1989`; found reading the header) | Cast to `int64` (`06` §18) |
+| Using global navigation idleness (`!IsNavigationBuildInProgress() && !HasDirtyAreasQueued()`) as "this cell is ready" | Correct only when nothing else is building; with cells generating in a burst it waits for all of them | Only for a settled world (end of a run). Per-cell readiness is `HasDirtyTiles(CellBounds)` (S3) |
+| Counting a sample point on top of a prop as open floor | Pocket check false positives: a prop's top has its own navmesh island, which no path reaches | Project from 10 cm above the floor in a ±20 cm box: the floor's navmesh, never a top 45 cm up (`05` C4) |
+| Props shorter than the agent's step height (found in S2 code review) | They don't block: Recast treats them as steps, and their tops can count as floor. A centre-pivot shape on the floor stands only 50 cm × scale tall | Keep the smallest prop above `AgentMaxStepHeight` (35 cm by default): scale ≥ 0.9 here (`05` C3) |
+| Taking wall-clock timings from a `-nullrhi` run (found in S2) | Game time runs about 2.5 times faster than the wall clock: S2's seed-1 run generated its last cell after 8.2 s without the GPU and 20.1 s with it, for the same path in game time | Without rendering a frame takes well under 0.5 ms, and the world clamps every frame's game time to at least `MinUndilatedFrameTime` = 0.5 ms (`BaseGame.ini:198`, `AWorldSettings::FixupDeltaSeconds`, `WorldSettings.cpp:334–343`, applied every world tick at `LevelTick.cpp:1599`). Use `-nullrhi` for functional checks only; measure on the GPU (`09` S2) |
+| A prop layout whose gaps are only a little wider than the agent | A rare enclosed point: S2's first run had one, in one cell of one seed | Keep the narrowest gap above the agent's width plus the voxel rounding on both sides (`05` C3) |
+| `exit /b %ERRORLEVEL%` inside an `if ( … )` block (found in S2 code review) | The script returns the code from **before** the command in the block ran (reproduced: 0 instead of 3), so a failed uncooked run looked fine | cmd expands `%VAR%` when it reads the whole block. Put the command and its `exit /b` on their own lines (`goto` a label), or use delayed expansion `!ERRORLEVEL!` (`05` C6) |
+
 ## Engine traps the design avoids (found in Phase 2)
 
 | Trap | What goes wrong | How the design avoids it | Evidence |

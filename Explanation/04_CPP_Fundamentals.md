@@ -2,7 +2,7 @@
 
 **Rule:** only the language ideas this project's files actually rely on, each with a tiny example first and then where it appears in our code. This file grows with every implementation step.
 
-**State (S1):** sections 1–6 cover the Phase 4 files (module entry points, C# build rules, descriptors, INI). Sections 7–15 cover the C++ the S1 world spike uses.
+**State (S2):** sections 1–6 cover the Phase 4 files (module entry points, C# build rules, descriptors, INI). Sections 7–15 were written for the S1 world spike; their examples now point at the S2 code, with the S1-only code noted. Sections 16–22 cover what S2 adds.
 
 ---
 
@@ -83,7 +83,7 @@ double Half = NRBench::ArenaHalfSize;
 ```
 - A **namespace** groups names so they can't clash with others (`NRBench::ArenaHalfSize` vs any other `ArenaHalfSize`).
 - **`constexpr`** means "computed at compile time"; **`const`** means "never changes after initialisation". Both replace magic numbers with a name and a comment saying why the value is what it is.
-- **In our code:** every tunable of the S1 spike lives in `namespace NRBench` at the top of `NRBenchmarkSubsystem.cpp`; the graph builder is `namespace NRGraphFactory`.
+- **In our code:** every tunable of the director lives in `namespace NRBench` at the top of `NRBenchmarkSubsystem.cpp` (the arena centre above is the S1 value; `04` §20 shows S2's); the graph builder is `namespace NRGraphFactory`, the hash `namespace NavReadyContentHash`.
 
 ## 8. References as output parameters
 
@@ -93,7 +93,7 @@ int R; if (TryDivide(7, 2, R)) { /* R == 3 */ }
 ```
 - A **reference** (`int&`) is another name for an existing variable: writing to it writes the caller's variable. It can't be null, unlike a pointer.
 - Unreal names such parameters `Out…`. A reference **to a pointer** (`UPCGVolumeSamplerSettings*&`) lets a function hand back a pointer.
-- **In our code:** `AddNodeOfType<T>(T*& OutSettings)`, `CheckArenaPath(FString& OutDetail)`, `GetNavigation(World, UNavigationSystemV1*& OutNavSys)`.
+- **In our code:** `AddNodeOfType<T>(T*& OutSettings)`, `GetNavigation(World, UNavigationSystemV1*& OutNavSys)`, `GetGeneratedComponents(TArray<…>& OutComponents)`, and the engine's `GetInstanceTransform(Index, FTransform& Out, bWorldSpace)` (S1 also had `CheckArenaPath(FString& OutDetail)`).
 
 ## 9. `const` member functions and `const` locals
 
@@ -102,16 +102,16 @@ struct FCell { FBox Box; FBox GetBounds() const { return Box; } };  // promises 
 const FBox Bounds = Cell.GetBounds();                               // this local never changes
 ```
 - A `const` member function can be called on a `const` object and can't change its members. The compiler enforces it.
-- **In our code:** `GetCellBounds() const`, `GetGeneratedComponents(...) const`, `CheckArenaPath(...) const`, `AllChecksPassed() const`.
+- **In our code:** `GetCellBounds() const`, `GetGeneratedComponents(...) const`, `IsArenaNavigable() const`, `AreTilesAlignedWithCells() const`, `CellsGenerated() const`.
 
 ## 10. `enum class`
 
 ```cpp
-enum class EVerdict : uint8 { Pending, Pass, Fail };
-EVerdict V = EVerdict::Pending;     // must be qualified; doesn't convert to int silently
+enum class EPhase : uint8 { Idle, WaitingForNavmesh, Flying, Settling, Done };
+EPhase Phase = EPhase::Idle;        // must be qualified; doesn't convert to int silently
 ```
-- Named states instead of magic integers (the first S1 draft used `0 / 1 / -1`). `: uint8` fixes the storage size at one byte.
-- **In our code:** the three spike checks' verdicts.
+- Named states instead of magic integers (the first S1 draft used `0 / 1 / -1` for its check verdicts). `: uint8` fixes the storage size at one byte.
+- **In our code:** the director's run phases (S2); in S1, the spike checks' verdicts.
 
 ## 11. Lambdas
 
@@ -128,7 +128,7 @@ Numbers.RemoveAll([](int32 N) { return N % 2 == 0; });   // keeps 1 and 3
 for (int32* Value : { &A, &B, &C }) { *Value = 0; }
 ```
 - `for (Element : Container)` visits every element. A braced list `{ … }` becomes a temporary `std::initializer_list`, handy for "do the same to these three variables".
-- **In our code:** `FinishChecks` turns every still-pending verdict into a failure with one loop over `{ &NavVerdict, &GenerationVerdict, &CarveVerdict }`.
+- **In our code:** `for (const TCHAR* Path : NRBench::PropMeshPaths)` (a C array) loads the meshes; `HashComponents` loops over its sorted components. (S1's `FinishChecks` looped over the braced list `{ &NavVerdict, &GenerationVerdict, &CarveVerdict }`.)
 
 ## 13. `static` local variables
 
@@ -142,7 +142,7 @@ const FName& LabelName() { static const FName Name(TEXT("PerQualityLevelFloat"))
 
 ```cpp
 if (Ptr && Ptr->IsValid()) { … }            // the right side runs only if Ptr isn't null
-if (!BuildArena(W) || !SpawnTestCell(W)) {…} // SpawnTestCell runs only if BuildArena succeeded
+if (!BuildArena(W) || !SpawnCells(W)) {…}    // SpawnCells runs only if BuildArena succeeded
 ```
 - `&&` stops at the first `false`, `||` at the first `true`. That makes "check, then use" safe in one expression, and orders steps that depend on each other.
 - **In our code:** the set-up in `OnWorldBeginPlay`, `bRadiiSet` in `Configure`, the null checks before every navigation query.
@@ -157,3 +157,82 @@ Use(MyGraph);                          // error unless the compiler has seen tha
 - A **forward declaration** keeps headers light: anything that only stores or passes a pointer doesn't need the full class.
 - Anything that needs the class's **layout or inheritance** (calling a member, converting to a base class) needs its header.
 - **In our code:** headers forward-declare `UPCGComponent`, `UPCGGraph`, `ACameraActor`; `NRCellActor.cpp` includes `PCGGraph.h` because `SetGraphLocal(UPCGGraphInterface*)` needs the `UPCGGraph` → `UPCGGraphInterface` conversion (S1's first build failed with `error C2664` without it).
+
+## Added in step S2
+
+## 16. Fixed-size arrays, `sizeof`, and padding
+
+```cpp
+int64 Values[10] = { /* ten quantized numbers */ };   // 10 x 8 bytes = 80 bytes, no gaps
+FCrc::MemCrc32(Values, sizeof(Values));                 // sizeof gives the array's size in bytes: 80
+
+struct FMixed { uint32 A; int64 B; };                   // 4 bytes, then 4 bytes of PADDING, then 8 bytes
+```
+- A **C array** (`int64 Values[10]`) is a fixed number of elements stored back to back. Its name converts to a pointer to the first element; `sizeof` on the array (not on a pointer) gives the total bytes.
+- **Padding:** the compiler aligns each member to its natural boundary, so `FMixed` has 4 unused bytes between `A` and `B`. Their content is undefined, so hashing a struct's raw memory can give a different hash for equal values. An array of one type has no padding.
+- **In our code:** `HashInstance` puts all ten quantized values into one `int64` array and hashes its memory.
+
+## 17. Pointers into an array, and the conditional operator
+
+```cpp
+int64* Quat = &Values[3];          // points at element 3; Quat[0] is Values[3], Quat[3] is Values[6]
+const int64 Deciding = Quat[3] != 0 ? Quat[3] : (Quat[0] != 0 ? Quat[0] : Quat[1]);
+```
+- `&Values[3]` is the address of one element; indexing from it walks forward, so `Quat[i]` is `Values[3 + i]`. It must stay inside the array.
+- `Condition ? A : B` is an **expression** that yields `A` or `B`. Nested, it reads as "the first non-zero of …". Brackets make the nesting visible.
+- **In our code:** choosing the quaternion's sign (W, else X, Y, Z) in `HashInstance`.
+
+## 18. `static_cast` and rounding to an integer
+
+```cpp
+const int64 Steps = static_cast<int64>(FMath::RoundToDouble(Value / Step));   // 12.34 cm / 0.1 -> 123
+```
+- `static_cast<T>(x)` is the checked, explicit conversion between related types (here `double` to `int64`). It truncates, so the value is rounded first.
+- `int64` holds about ±9.2 × 10^18, far more than any world position in 0.1 cm steps (a 1,000 km world is 10^9 steps).
+- **In our code:** `NavReadyContentHash::Quantize`.
+
+## 19. Defaulted comparison (C++20)
+
+```cpp
+struct FNavReadyCellHash
+{
+	uint32 ContentHash = 0; uint32 OrderedHash = 0; int32 NumInstances = 0;
+	bool operator==(const FNavReadyCellHash& Other) const = default;   // compares every member, in order
+};
+```
+- `= default` asks the compiler to write the operator: member-wise `==`. C++20 also derives `!=` from it. Unreal 5.8 compiles as C++20: it is both the default and the minimum (`Programs/UnrealBuildTool/System/CppCompileEnvironment.cs:61, 71`).
+- **In our code:** `FNavReadyCellHash`; the S5 tests compare whole cell hashes with it.
+
+## 20. Constants built from constants
+
+```cpp
+constexpr double NavTileSize = 988.0;
+constexpr double CellSize = 3.0 * NavTileSize;        // still a compile-time constant
+const FVector ArenaCenter(101.0 * NavTileSize, NavTileSize, 0.0);
+```
+- A `constexpr` value can be used in other `constexpr` expressions, so one named number can drive a layout. Changing it changes every dependent value consistently.
+- **In our code:** the tile size fixes the cell size and the arena's position; two run-time checks (`AreTilesAlignedWithCells`, the lattice check in `SpawnCells`) catch a constant that no longer matches the engine or the graph.
+
+## 21. Views: `TConstArrayView` and `FStringView`
+
+```cpp
+void Hash(TConstArrayView<uint32> Values);    // accepts a TArray<uint32>, a C array, or part of one, without copying
+TArray<uint32> A = {1, 2, 3}; Hash(A);
+```
+- A **view** is a pointer plus a length: it refers to someone else's elements and owns nothing. It is cheap to pass by value. The caller must keep the data alive while the view is used.
+- `TConstArrayView<const UInstancedStaticMeshComponent*>` accepts a `TArray<UInstancedStaticMeshComponent*>`: adding `const` is allowed, the reverse isn't (`Containers/ArrayView.h:28`).
+- `FStringView` is the same for text. It is **not** null-terminated, so functions that read until a null character can't take its data.
+- **In our code:** every `NavReadyContentHash` function takes views.
+
+## 22. Default member initialisers and plain structs inside a class
+
+```cpp
+class UNRBenchmarkSubsystem
+{
+	struct FCellRecord { FIntPoint Grid = FIntPoint::ZeroValue; double GenerationDone = -1.0; };   // -1 = not yet
+	TArray<FCellRecord> Records;
+};
+```
+- `= value` on a member gives it that value in every new object, so no constructor is needed.
+- A struct declared **inside** a class is a nested type: private to the class if declared in a `private:` section.
+- **In our code:** `FCellRecord` (-1 marks "not happened yet") and `FRockFieldParams`.

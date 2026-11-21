@@ -5,8 +5,9 @@
 | Part | Step | Files |
 |---|---|---|
 | A | Phase 4, F1–F3 (foundation) | `.uproject`, two `Target.cs`, two `Build.cs`, two module `.cpp`, `.uplugin`, three config `.ini`, `Tools\*.bat`, `Tools\cpu_affinity.py` |
-| B | S1 (world spike) | `NRGraphFactory`, `NRCellActor`, `NRBenchmarkSubsystem` (S1 version), `NavReadyPCG.Build.cs`, config, `Tools\run_packaged.bat`, `s1_checks.bat` |
-| C onwards | S2–S7 | written with each step |
+| B | S1 (world spike) | `NRGraphFactory`, `NRCellActor`, `NRBenchmarkSubsystem` (S1 version, replaced in S2), `NavReadyPCG.Build.cs`, config, `Tools\run_packaged.bat`, `s1_checks.bat` (both removed in S2) |
+| C | S2 (content and the determinism hash) | `NavReadyContentHash` and its tests (plugin), `NRGraphFactory` (extended), `NRBenchmarkSubsystem` (S2 version), `NavReadyPCG.Build.cs`, `Tools\run_game.bat`, `run_tests.bat`, `s2_checks.bat`, `compare_hashes.py` |
+| D onwards | S3–S7 | written with each step |
 
 ---
 
@@ -227,7 +228,7 @@ namespace NRGraphFactory
 | Line | What it does, and why |
 |---|---|
 | `namespace NRGraphFactory` + free functions | No state, no lifetime: a namespace of functions is enough (`02` §4.2). *Rejected:* a `UObject` "factory" class, which would need its own lifetime for nothing |
-| `struct FRockFieldParams` | Every graph setting in one plain struct, so the director can vary them per run (S2 adds the transform and thinning parameters) |
+| `struct FRockFieldParams` | Every graph setting in one plain struct, so the director can vary them per run (S2 adds the transform parameters and a second mesh, `05` C3) |
 | `VoxelSize = (300, 300, 1000)` | One point every 3 m in X and Y. Z is larger than the cell box is tall, so there is exactly one layer of points |
 | `TSoftObjectPtr<UStaticMesh> Mesh` | The spawner's mesh entry stores a soft reference (`FPCGMeshSelectorWeightedEntry(TSoftObjectPtr<UStaticMesh>, int)`); the director passes the already-loaded cube, so nothing is loaded asynchronously during generation |
 | `bNavigationVisible` | Becomes the spawner descriptor's *Can Ever Affect Navigation*: `true` in S1 and the baselines, `false` for NavReady (`02` §9) |
@@ -269,6 +270,8 @@ namespace NRGraphFactory
 | `GetGeneratedComponents(Out)` | Every `UInstancedStaticMeshComponent` on the actor, minus those without PCG's `"PCG Generated Component"` tag (`PCGHelpers.h:35`). One helper, used by the spike now and by the hash (S2) and the commit (S5) later (simplify finding: the loop was written twice) |
 
 ### B3. `NRBenchmarkSubsystem.h` / `.cpp`: the director (S1 version)
+
+> **Replaced in S2** by the run director (C4); the spike checks below are gone from the code. They stay documented because `09` S1's results came from this version (commit `474d40f`).
 
 **Class and lifetime**
 
@@ -350,8 +353,100 @@ PrivateDependencyModuleNames.AddRange(new string[] { "NavReadyPCGCore", "PCG", "
 
 ### B6. `Tools\`: running and checking the packaged build
 
+> `run_packaged.bat` and `s1_checks.bat` were **replaced in S2** by `run_game.bat` and `s2_checks.bat` (C6). The exit-code rule below applies to every check script.
+
 | Script / change | Key lines | Why |
 |---|---|---|
 | `run_packaged.bat <LogName> [nullrhi\|gpu] ["game args"]` | `"%EXE%" %RHI% -nosound -unattended -traceautostart=0 -log -abslog="%LOG%" %~3` | Runs the packaged game once for a functional check. **The game arguments are one quoted string:** batch splits unquoted arguments at `=`, so `-NRTimeout=30` would reach the game as two words (code-review finding); `%~3` strips the quotes and the game receives the text unchanged (tested: `['-NRSpike', '-NRTimeout=30']`). The exit code is the game's own |
 | `s1_checks.bat` | build editor, build game, package, spike without and with the GPU; `:step` prints timestamps | All S1 checks in one queue job |
 | **Every check script:** `if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%` after each `call :step` | replaces `call :step … \|\| exit /b` | **Found in S1:** under `cmd /c` (how the queue runs scripts), `exit /b` with no number returned **0**: a job whose build failed was recorded as passed (reproduced: 0 instead of 6). `if errorlevel 1` would fix that but misses a crash, whose NTSTATUS code is negative (code-review finding; reproduced: `-1073741819` now stops the script). `phase4_checks.bat` had the same latent bug; its Phase 4 results were real passes (every step printed `exit=0`) |
+
+---
+
+## Part C · Step S2: the content and the determinism hash
+
+**What S2 adds:** the real workload (16 cells, two prop meshes, seeded variation, a cruise-then-burst camera path), the plugin's first code (the content hash, with unit tests), a check that no cell encloses an unreachable pocket, and a run report. **What S2 removes:** the S1 spike checks; their results are recorded in `09` S1, and the director's run mode subsumes them (it waits for a navigable arena before the camera moves).
+
+**Files:** plugin `Public\NavReadyContentHash.h` + `Private\NavReadyContentHash.cpp` (C1), `Private\Tests\NavReadyTestFlags.h` + `NavReadyContentHashTests.cpp` (C2); game `Private\NRGraphFactory.h/.cpp` (C3), `Public\NRBenchmarkSubsystem.h` + `Private\NRBenchmarkSubsystem.cpp` (C4), `NavReadyPCG.Build.cs` (C5); `Tools\run_game.bat`, `run_tests.bat`, `s2_checks.bat`, `compare_hashes.py` (C6).
+
+### C1. `NavReadyContentHash.h` / `.cpp` (plugin): one hash per cell
+
+| Line | What it does, and why |
+|---|---|
+| `#define UE_API NAVREADYPCGCORE_API` … `#undef UE_API` | 5.8's export convention (`01b` of UE5-UpdateBudget §3): every exported function is marked `UE_API`, and the macro is undefined at the end so it can't leak into other headers |
+| `struct FNavReadyCellHash { ContentHash, OrderedHash, NumInstances }` | Plain data, no UObject: it is copied around freely and compared with the defaulted `operator==` (C++20) |
+| `ContentHash` | **Order-independent:** the same set of instances in any order gives the same value. This is what SC2 compares |
+| `OrderedHash` | **Order-dependent:** also changes when the same instances come out in a different order. Reported to test hypothesis H6 (PCG's multithreaded execution may change instance order); not a pass/fail criterion |
+| `LocationStep = 0.1`, `RotationStep = 1e-4`, `ScaleStep = 1e-3` | The quantization steps of `02` §7: 1 mm; 1e-4 per quaternion component (about 0.01°); 1e-3 of scale |
+| `HashInstance(FStringView MeshPath, const FTransform&)` | `Quantize(V, Step) = RoundToDouble(V / Step)` as `int64` for the 3 location, 4 rotation and 3 scale values. **All ten are `int64`, so the array has no padding bytes** and `FCrc::MemCrc32` over its memory is deterministic (a struct mixing `uint32` and `int64` would contain uninitialised padding) |
+| Quaternion sign | `q` and `-q` are the same rotation. One representative is chosen **after** quantization (W positive; if W rounds to 0, the first non-zero of X, Y, Z positive), so a component that rounds to zero can't flip the choice |
+| `FCrc::StrCrc32Len(MeshPath.GetData(), MeshPath.Len())` as the seed | The mesh's **path string** is hashed, never an `FName` index or a pointer (both change between runs). `StrCrc32Len`, not `StrCrc32`: a string view isn't null-terminated, and `StrCrc32`'s second parameter is a seed, not a length (`Core/Public/Misc/Crc.h:43, 65`) |
+| `Combine(TConstArrayView<uint32>)` | `OrderedHash` = CRC of the instance hashes as given; `ContentHash` = CRC of the same hashes **sorted** (a multiset: duplicates still count) |
+| `HashComponents(…)` | Takes the cell's generated ISM components, orders them by mesh path (`StableSort`, so ties keep their input order), reads every instance's **world** transform (`GetInstanceTransform(i, T, true)`), hashes and combines. Components are ordered because PCG's creation order isn't part of the content |
+| *Known limit* | Quantization ignores float noise **unless** a value sits within the noise of a rounding boundary; then one prop can still flip the hash. If SC2 ever fails, the order-dependent and per-cell values in the run report show which cell and whether the count changed |
+
+### C2. `NavReadyTestFlags.h`, `NavReadyContentHashTests.cpp` (plugin): unit tests
+
+Pure tests on hand-made transforms: no world, no PCG. Run with `Tools\run_tests.bat NavReadyPCG.Hash` (the editor, headless), the same mechanism as UE5-UpdateBudget.
+
+| Test | What it proves |
+|---|---|
+| `NavReadyPCG.Hash.OrderIndependent` | Reversing three instances keeps `ContentHash` and changes `OrderedHash` |
+| `NavReadyPCG.Hash.IgnoresFloatNoise` | 1e-5 cm and 1e-7 of scale (far below the steps) don't change the hash. The test values sit well away from rounding boundaries |
+| `NavReadyPCG.Hash.SeesRealChanges` | A 1 cm move, a 1° turn, a scale change, another mesh, or a missing prop each change the hash |
+| `NavReadyPCG.Hash.QuaternionSign` | `q` and `-q` hash the same |
+| `NavReadyPCG.Hash.Empty` | An empty cell has a stable hash, different from a cell with one prop |
+
+`EAutomationTestFlags::EditorContext | ClientContext | ProductFilter`: run in the editor and the game, under the "Product" filter; the macro requires exactly one filter flag. Hashes are `uint32`, and `TestEqual` has no `uint32` overload (the `int32`/`int64`/`SIZE_T`/`float`/`double` overloads make the call ambiguous, `Core/Public/Misc/AutomationTest.h:1985–1989`), so equal hashes are compared as `int64`, which still prints both values on a failure. `TestNotEqual` is a template and takes `uint32` directly (`:2412`).
+
+### C3. `NRGraphFactory` (game): Transform Points and two meshes
+
+| Change | Why |
+|---|---|
+| `VoxelSize = (400, 400, 1000)` | 4 m spacing, one layer (the 1 m tall box holds one Z lattice index). The sampler's lattice is **world-aligned**: points sit at whole multiples of the voxel size (`PCG/Private/Elements/PCGVolumeSampler.cpp:65–70, 139`), so a 29.64 m cell holds 7 or 8 points per side: 49, 56 or 64 props per cell, 900 in all (`09` S2 confirms) |
+| `UPCGTransformPointsSettings` (`MinimalAPI`): `OffsetMin/Max = ∓(25, 25, 0)`, `RotationMax = (0, 360, 0)`, `ScaleMin/Max = 0.9 / 1.4`, `bUniformScale = true` | Seeded per-point jitter, yaw and uniform scale. **Why these ranges:** the engine shapes' pivot is their centre (the director logs each mesh's bounds, `09` S2) and the points lie on the floor, so a prop stands 50 cm × scale above it; 0.9 keeps the smallest at 45 cm, above the 35 cm step height (`BaseEngine.ini:3056`), so every prop blocks. The offset isn't scaled (`bAbsoluteOffset` false: it is only rotated, `PCGTransformPoints.cpp:207–215`), so ±25 cm keeps lattice neighbours ≥ 3.5 m apart: the narrowest gap, between two 1.4 m cubes corner to corner, is about 1.5 m; a gap closes in the navmesh below about 1.15 m, because the agent's 34 cm radius rounds up to two 19 cm voxels on each side (`RecastNavMeshGenerator.cpp:5260`) and rasterization can add up to a voxel more on each side **[inferred]**. The first S2 run used ±50 cm (a 1 m worst gap) and found one enclosed sample point (`09` S2). Each point's seed is computed from its lattice indices (`PCGVolumeSampler.cpp:157`); Transform Points draws from `FRandomStream(ComputeSeed(Seed, PointSeed))`, where `Seed` combines the node's seed with the component's (`PCGTransformPoints.cpp:70, 170`, `PCGSettings.cpp:723–726`). So a cell's content is fixed by its seed and position, and changes with the component seed (checked in S2) |
+| Mesh entries: cube and cylinder, weight 1 each | The weighted selector picks a mesh per point from a stream seeded the same way: point, node and component seed (`MeshSelectors/PCGMeshSelectorWeighted.cpp:228–230`, `Helpers/PCGHelpers.cpp:55–61`) |
+| Wiring check covers all three target pins | As in S1: the edge functions don't report success |
+| *Dropped:* the "thinning to about half" of `01` §6.1 | A thinning node adds a moving part and its own seed; the same density is set more simply by the voxel size (`02` §14) |
+
+### C4. `NRBenchmarkSubsystem` (game): the director, S2 version
+
+| Part | What it does, and why |
+|---|---|
+| `-NRRun`, `-NRSeed=`, `-NRRunTag=`, `-NRTimeout=` (default 90), `-NRExit` | Run mode replaces S1's `-NRSpike` |
+| `#include "NavReadyContentHash.h"` in the public header | `FCellRecord` stores an `FNavReadyCellHash` by value, so the header needs the type. A public header now includes a plugin header, so the plugin becomes a **public** dependency (C5) |
+| `struct FCellRecord { Grid, Seed, GenerationStart, GenerationDone, Hash }` | One record per cell, in a plain `TArray` (no UObject, so no `UPROPERTY`); the cell actors themselves are in a `UPROPERTY` array so GC sees them |
+| `enum class EPhase { Idle, WaitingForNavmesh, Flying, Settling, Done }` | The run's timeline. `Settling` exists for the pocket check, which needs the navmesh after every tile has been rebuilt |
+| `NavTileSize = 988`, `ArenaCenter = (101 × 988, 988, 0)`, `CellSize = 3 × 988` | The engine's navmesh tiles are not 10 m: the generator truncates `TileSizeUU` (1000) to whole voxels, `TruncToInt(1000 / 19) = 52` voxels × 19 cm = **988 cm** (`NavigationSystem/Private/NavMesh/RecastNavMeshGenerator.cpp:5270`, `Public/NavMesh/RecastNavMeshGenerator.h:129`, `RecastNavMesh.cpp:1894–1899`), and the tile grid starts at the world origin unless `NavMeshOriginOffset` is set (`RecastNavMesh.h:788–790`; it becomes the Detour origin, `RecastNavMeshGenerator.cpp:5623–5627`). So a 30 m cell can't line up with tiles; a 29.64 m cell (3 × 3 tiles) on a tile boundary does, and no tile lies in two cells |
+| Mesh bounds line in `BuildArena` | Logs each prop mesh's Z extent around its pivot (`UStaticMesh::GetBoundingBox`): the fact the scale range depends on (C3), recorded in every run |
+| `NRRun: pocket point in cell …` log line | Where an enclosed point is, so a pocket can be looked at instead of only counted |
+| Lattice check in `SpawnCells` | A cell edge exactly on the sampler's 4 m lattice would give the points on that line to **both** cells: two overlapping props. With the arena centred on y = 0, the edge y = 0 did exactly that, so the arena moved one tile off the axis; every edge is now at least 24 cm from a lattice line. The check fails the run if a changed constant brings an edge within 1 cm of the lattice |
+| `AreTilesAlignedWithCells()` | At warm-up, compares the real navmesh's `GetTileSizeUU()` and `NavMeshOriginOffset` with those assumptions and fails the run if they differ, so a changed navmesh setting can't silently break per-cell readiness |
+| `SpawnCells`: 4 × 4 cells, seed `BaseSeed * 100 + Index` | A different base seed changes every cell's seed |
+| `AddUObject(this, &HandleCellGenerated, Index)` | A **payload** argument: the delegate's own parameter (`UPCGComponent*`) comes first, then the bound `Index`, so the handler knows which cell fired without searching |
+| `NRBench::ArenaCorner(Sign)`, `NRBench::GetNavigation(World, OutNavSys)` | One definition each of the arena corner (5 m inside the edges, 50 cm up) and of the navigation lookup, shared by the warm-up path, the tile check, the idle check and the pocket check |
+| `IsArenaNavigable()` (warm-up gate) | The camera holds still until a corner-to-corner path is complete, so generation never races the arena's initial navmesh build |
+| `NRBench::CameraX(FlightSeconds)` | The path: from x = −110 m at 4 m/s to −50 m (cruise: grid columns come into range one at a time), then 12 m/s to +110 m (burst: the last two columns come into range within about 4 s). Along the arena's X axis through its centre, 15 m up. The scheduler measures from the source to the cell's **bounds** in 2D (`PCG/Private/RuntimeGen/PCGRuntimeGenScheduler.cpp:742–751`; 2D because a graph's `bUse2DGrid` defaults to true, `PCG/Public/PCGGraph.h:728`, read through `PCGComponent.cpp:172–180`), so the outer rows (nearest edge 29.64 m from the path) are reached too |
+| Times in `FCellRecord` | Wall-clock seconds since the flight started (`FPlatformTime::Seconds()`), because PCG's budget and tile builds run in real time (`01b` B-1) |
+| `HandleCellGenerated` → `NavReadyContentHash::HashComponents` | The hash is taken the moment PCG reports the cell generated |
+| `IsNavigationIdle()` | `!HasDirtyAreasQueued() && !IsNavigationBuildInProgress()`: nothing waiting to be marked dirty, and no generator reports a build in progress (`NavigationSystem/Private/NavigationSystem.cpp:3561–3564, 4889–4911`). Global, so fine for a settled world at the end of a run; a cell's readiness (S3) must not use it (`07`) |
+| `Settling`, then `CheckPockets()` | At least 1 s after the last cell generated (`SettleSeconds`: its props reach the navigation octree in a later navigation tick), then until navigation has been idle for **two frames in a row** (`RequiredIdleFrames`: one idle frame can be a gap between tile tasks, as in S1). Then, per cell, a 14 × 14 grid of points is projected onto the navmesh from 10 cm above the floor in a ±5 cm × ±20 cm box: that finds the floor's navmesh, never the tops of props (45 cm and taller), and fails where a prop stands. Every point that projects gets a `FindPathSync` from the arena corner; an incomplete or partial path is a **pocket point**. Pockets would make agents fail for a reason that has nothing to do with stale navigation, so S2 requires zero (`03` S2) |
+| `FinishRun(Reason, bCompleted)` | Every end of the run goes through it: set-up failure, no navmesh, tiles that don't match, timeouts, success. The run passes only if `bCompleted`, every cell generated, **every cell has props and at least one blocked sample point** (so a run whose props lost their collision or navigation flag fails instead of measuring nothing), and no cell started generating before the flight (its times would be meaningless) |
+| Order in `SpawnCells` | The record and the cell are added **before** the delegates are bound and `FinishSpawning` runs, so a handler can never index past them |
+| `FMath::Clamp(BaseSeed, 0, 1000000)`, `FPaths::MakeValidFileName(RunTag, '_')` | The seed keeps `BaseSeed × 100 + index` far inside `int32`; the tag names the report file, so it may not contain folders or `..` (`Core/Public/Misc/Paths.h:696`) |
+| End of run | After the pocket check, or at the timeout. `FinishRun` logs one line per cell and a summary with a **run content hash** (the cell hashes chained in cell order with `FCrc::TypeCrc32`: one value to compare runs by), then writes `Saved/NRRuns/<RunTag>.csv` |
+| Exit | As in S1: a clean exit on success, a forced exit with code 1 on failure |
+
+### C5. `NavReadyPCG.Build.cs`
+
+`NavReadyPCGCore` moves from private to **public**: `NRBenchmarkSubsystem.h` (a public header) now includes `NavReadyContentHash.h`. The rule from `06` §2, applied header by header.
+
+### C6. `Tools\` (S2)
+
+| Script | Why |
+|---|---|
+| `run_game.bat <Log> <nullrhi\|gpu\|uncooked> ["args"]` | Replaces S1's `run_packaged.bat` and adds `uncooked` mode (the editor binary in `-game`), needed to compare editor and packaged content. The game arguments are one quoted string (S1 code-review finding). **Each launch is on its own line, outside any `( )` block** (S2 code review): cmd expands `%ERRORLEVEL%` in a block when it reads the block, so an `exit /b %ERRORLEVEL%` inside one returned the code from before the game ran (reproduced: 0 instead of 3). An older log is deleted first, so a run that never starts can't leave stale results for `compare_hashes.py` |
+| `run_tests.bat [Filter]` | The editor, headless: `-ExecCmds="Automation RunTests <Filter>;Quit"`. The automation command splits its own text at `;` (`Developer/AutomationController/Private/AutomationCommandline.cpp:582`), and its `Quit` exits with **−1** if any test failed, else 0, through a forced exit (`:491–504`). Adapted from UE5-UpdateBudget |
+| `s2_checks.bat` | Builds, unit tests, package, then five runs (seed 1 twice, seed 2, seed 1 on the GPU, seed 1 uncooked) and the comparison, stopping at the first failure |
+| `compare_hashes.py <folder>` | Reads each run's per-cell log lines and checks SC2 as far as S2 can: identical content across runs, RHIs and builds for the same seed; a different seed changes every cell; every cell generated; no pocket points in any run. Exit 1 on failure. Self-tested on synthetic logs (pass, one changed cell, one pocket) |
+| *Removed:* `s1_checks.bat`, `run_packaged.bat` | Their job (the S1 spike) is done and recorded in `09`; git history keeps them |

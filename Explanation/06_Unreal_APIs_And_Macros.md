@@ -136,7 +136,7 @@
 5. **When not to.** Plain data that no system needs to see (counters, timestamps) doesn't need `UPROPERTY`.
 6. **Common mistakes.** A raw `UObject*` member without `UPROPERTY` (GC can free the object under you); forgetting that `IsValid()` is still needed between a `Destroy()` and the next GC.
 7. **Example.** `UPROPERTY(Transient) TObjectPtr<UPCGGraph> Graph;`
-8. **In this project.** The director holds the graph, the cube mesh, the test cell and the camera as `UPROPERTY(Transient)` members (transient: never saved). The cell actor's two components are `UPROPERTY(VisibleAnywhere)`, shown read-only in the editor.
+8. **In this project.** The director holds the graph, the prop meshes, the 16 cells and the camera as `UPROPERTY(Transient)` members (transient: never saved). The cell actor's two components are `UPROPERTY(VisibleAnywhere)`, shown read-only in the editor.
 
 ## 8. `UWorldSubsystem` / `UTickableWorldSubsystem`
 
@@ -147,7 +147,7 @@
 5. **When not to.** Per-actor state (use a component), or state that must outlive a world (`UGameInstanceSubsystem`).
 6. **Common mistakes.** Forgetting that editor worlds get subsystems too; doing world set-up in `Initialize` (actors can't be spawned yet); a tickable that does work when it has nothing to do.
 7. **Example.** `bool DoesSupportWorldType(const EWorldType::Type T) const override { return T == EWorldType::Game || T == EWorldType::PIE; }`
-8. **In this project.** `UNRBenchmarkSubsystem`: Game and PIE worlds only; builds the arena in `OnWorldBeginPlay`; its `Tick` returns at once unless `-NRSpike` was given.
+8. **In this project.** `UNRBenchmarkSubsystem`: Game and PIE worlds only; builds the arena in `OnWorldBeginPlay`; its `Tick` does nothing unless `-NRRun` was given (`-NRSpike` in S1).
 
 ## 9. Spawning actors and components at runtime
 
@@ -218,7 +218,7 @@
 5. **When not to.** Hundreds of queries per frame: use `FindPathAsync`.
 6. **Common mistakes.** Treating `IsSuccessful()` as "complete" (check `IsPartial()` too); a projection extent so tall it finds navmesh on top of an obstacle (fixed in S1); `GetDefaultNavDataInstance()` with the creating overload in a query path.
 7. **Example.** `const FPathFindingResult R = NavSys->FindPathSync(FPathFindingQuery(this, *NavData, Start, End));`
-8. **In this project.** The spike's navmesh and carve checks; the readiness probe (S3) and agents (S4) build on the same calls.
+8. **In this project.** S1: the spike's navmesh and carve checks. S2: the warm-up path, the pocket check and the end-of-run idle wait. The readiness probe (S3) and agents (S4) build on the same calls.
 
 ## 15. Writing a reflected property: `FindPropertyByName`, `CastField`, `ContainerPtrToValuePtr`
 
@@ -235,13 +235,104 @@
 
 | API | Use here | Note |
 |---|---|---|
-| `FCommandLine::Get()`, `FParse::Param`, `FParse::Value` | `-NRSpike`, `-NRExit`, `-NRTimeout=` | `Param` matches `-Name`; `Value` reads after `Name=` |
-| `LoadObject<UStaticMesh>(nullptr, Path)` | the cube, once, at begin play | synchronous; the folder must be cooked (`DirectoriesToAlwaysCook`) |
+| `FCommandLine::Get()`, `FParse::Param`, `FParse::Value` | `-NRRun`, `-NRSeed=`, `-NRRunTag=`, `-NRTimeout=`, `-NRExit` (S1: `-NRSpike`) | `Param` matches `-Name`; `Value` reads after `Name=` |
+| `LoadObject<UStaticMesh>(nullptr, Path)` | the cube and the cylinder, once, at begin play | synchronous; the folder must be cooked (`DirectoriesToAlwaysCook`) |
 | `DEFINE_LOG_CATEGORY_STATIC`, `UE_LOG` | `LogNRBench`, `LogNRGraph`, `LogNRCell` | file-local categories; `Error` lines make failures visible in the queue log |
 | `FPlatformMisc::RequestExit(false)` / `RequestExitWithStatus(true, 1)` | exit after the checks | on Windows only the forced form returns a non-zero code (`WindowsPlatformMisc.cpp:1493–1521`) |
 | `UActorComponent::ComponentHasTag`, `AActor::GetComponents` | finding PCG-generated components | PCG tags them `"PCG Generated Component"` (`PCGHelpers.h:35`) |
 | `ACameraActor`, `APlayerController::SetViewTarget` | the generation source | PCG's player source reads the view point |
 | `UCollisionProfile::NoCollision_ProfileName` / `BlockAll_ProfileName` | volumes vs props | `BlockAll` blocks Pawn, so it affects navigation |
 | `AStaticMeshActor::SetMobility(Movable)` | the floor | Static components refuse `SetStaticMesh` after begin play |
-| `FBox::ComputeSquaredDistanceToPoint` | camera-to-cell distance | the scheduler's own measure |
+| `FBox::ComputeSquaredDistanceToPoint` | camera-to-cell distance (S1 spike only; removed in S2) | the scheduler's own measure |
 | Delegate `AddUObject(this, &Class::Method)` | PCG start/generated events | weak binding: skipped if the object is gone |
+
+---
+
+## APIs added in step S2 (content and the determinism hash)
+
+| # | API | Where |
+|---|---|---|
+| 17 | `FCrc`: `MemCrc32`, `StrCrc32Len`, `TypeCrc32` | `NavReadyContentHash`, director |
+| 18 | Automation tests: `IMPLEMENT_SIMPLE_AUTOMATION_TEST`, `RunTest`, `TestEqual` / `TestNotEqual` / `TestTrue`, test flags, running them headless | plugin tests, `run_tests.bat` |
+| 19 | PCG Transform Points and the weighted mesh selector; PCG's seeds | `NRGraphFactory` |
+| 20 | Reading instances: `UInstancedStaticMeshComponent::GetInstanceCount`, `GetInstanceTransform` | `NavReadyContentHash::HashComponents` |
+| 21 | Navmesh tiles and idleness: `ARecastNavMesh::GetTileSizeUU`, `NavMeshOriginOffset`, `IsNavigationBuildInProgress`, `HasDirtyAreasQueued` | director |
+| 22 | Delegates with a payload: `AddUObject(this, &Method, Payload)` | director |
+| 23 | Small utilities used in S2 | director, hash |
+
+## 17. `FCrc`: `MemCrc32`, `StrCrc32Len`, `TypeCrc32`
+
+1. **What it is.** Static CRC-32 functions over memory, strings and single values (`Runtime/Core/Public/Misc/Crc.h:29, 36, 43, 65`).
+2. **Why it exists.** Cheap, stable checksums: the same bytes always give the same value, on every run and machine.
+3. **How it works.** Each takes an optional starting value, so CRCs can be chained: `MemCrc32(Data, Bytes, Seed)`. `StrCrc32(Data, CRC)` reads up to a null terminator, and its second parameter is a **seed**; `StrCrc32Len(Data, Length, CRC)` reads exactly `Length` characters. `TypeCrc32(Value, CRC)` hashes one value's bytes.
+4. **When to use it.** Determinism checks and change detection over plain data you control. Epic's own comment prefers `Hash/Fnv.h` for new code ("CRCs are not very good and fairly slow"); for a few thousand values per cell, once per generation, speed doesn't matter, and CRC-32 is the one every reader knows.
+5. **When not to.** Security (CRC is trivially forgeable), hash tables (use `GetTypeHash`), or any memory with padding bytes or pointers: their values aren't part of the content.
+6. **Common mistakes.** `StrCrc32(View.GetData(), View.Len())`: compiles, but the length becomes the seed and the read runs past the view to the next null. Hashing an `FName`'s index or an object pointer (both change between runs). Hashing a struct with padding.
+7. **Example.** `FCrc::MemCrc32(Values, sizeof(Values), FCrc::StrCrc32Len(Path.GetData(), Path.Len()))`
+8. **In this project.** One CRC per instance (quantized transform seeded with the mesh path's CRC), one over the sorted instance CRCs per cell, and `TypeCrc32` to chain the 16 cell hashes into one run hash.
+
+## 18. Automation tests
+
+1. **What it is.** Unreal's test framework (`Runtime/Core/Public/Misc/AutomationTest.h`). `IMPLEMENT_SIMPLE_AUTOMATION_TEST(Class, "Dotted.Name", Flags)` declares a test class (`:4297`); you write its `RunTest(const FString& Parameters)`.
+2. **Why it exists.** Tests that run inside the engine, from the editor's Session Frontend or from the command line, with their results in the log and a report.
+3. **How it works.** Each `Test…` call records an error on failure and returns `bool`; `RunTest` returns whether the test passed. **Flags:** at least one context (`EditorContext`, `ClientContext`, …: where the test may run) and **exactly one** filter (`ProductFilter`, `EngineFilter`, …), enforced by a `static_assert` in the macro (`:4127–4134`). From the command line, `-ExecCmds="Automation RunTests <Filter>;Quit"` runs every test whose name starts with `<Filter>`. The automation command splits its own text at `;` (`Developer/AutomationController/Private/AutomationCommandline.cpp:582`), and its `Quit` exits with −1 if any test failed (`:491–504`).
+4. **When to use it.** Pure logic with no world: hashing, the readiness policy (S5).
+5. **When not to.** Behaviour that needs a running packaged game: that is what the run checks (`s2_checks.bat`) are for.
+6. **Common mistakes.** Two filter flags (compile error) or none. `TestEqual` with `uint32`: there are overloads for `int32`, `int64`, `SIZE_T`, `float` and `double` (`:1985–1989`), so the call is ambiguous; cast to `int64`. `TestNotEqual` is a template (`:2412`) and takes any comparable type.
+7. **Example.** `IMPLEMENT_SIMPLE_AUTOMATION_TEST(FNavReadyHashEmptyTest, "NavReadyPCG.Hash.Empty", NavReadyTests::Flags)`
+8. **In this project.** Five hash tests in the plugin under `NavReadyPCG.Hash.*`, run by `Tools\run_tests.bat`.
+
+## 19. PCG Transform Points, the weighted mesh selector, and PCG's seeds
+
+1. **What it is.** `UPCGTransformPointsSettings` (`MinimalAPI`, so creatable from our code: `PCG/Public/Elements/PCGTransformPoints.h:12–13`) offsets, rotates and scales each point by random amounts within ranges (`OffsetMin/Max`, `RotationMin/Max`, `ScaleMin/Max`, `bUniformScale`: `:48–79`). The spawner's weighted mesh selector picks one mesh entry per point.
+2. **Why it exists.** Natural-looking variation from one regular point set.
+3. **How it works.** Randomness in PCG is seeded, never global. The Volume Sampler gives each point a seed from its lattice indices (`PCGVolumeSampler.cpp:157`). A node that uses seeds combines its own seed with the component's (`UPCGSettings::GetSeed`, `PCGSettings.cpp:723–726`); Transform Points then draws from `FRandomStream(ComputeSeed(NodeAndComponentSeed, PointSeed))` (`PCGTransformPoints.cpp:70, 170`), and the weighted selector from a stream seeded with the point, node and component seeds (`PCGMeshSelectorWeighted.cpp:228–230`, `PCGHelpers.cpp:55–61`).
+4. **When to use it.** Whenever content should vary per instance but be reproducible.
+5. **When not to.** For a layout that must stay exactly regular.
+6. **Common mistakes.** Expecting different content from cells with the same component seed: the point seeds come from world lattice positions, so only the component seed (or position) tells cells apart. Forgetting `bUniformScale` reads only the X components of the scale range.
+7. **Example.** `Transform->RotationMax = FRotator(0.0, 360.0, 0.0);` (yaw only)
+8. **In this project.** Jitter ±25 cm in X and Y, any yaw, uniform scale 0.9–1.4; cube and cylinder at weight 1. Cell seed = base seed × 100 + index.
+
+## 20. Reading instances: `GetInstanceCount`, `GetInstanceTransform`
+
+1. **What it is.** `UInstancedStaticMeshComponent::GetInstanceCount()` and `GetInstanceTransform(Index, OutTransform, bWorldSpace = false)` (`Runtime/Engine/Classes/Components/InstancedStaticMeshComponent.h:435, 338`).
+2. **Why it exists.** Read access to the per-instance data of an ISM.
+3. **How it works.** Instance transforms are stored relative to the component; with `bWorldSpace = true` the component's transform is applied. Returns `false` for an invalid index.
+4. **When to use it.** Inspecting or hashing generated content.
+5. **When not to.** Every frame over large ISMs (it copies a transform per call).
+6. **Common mistakes.** Forgetting `bWorldSpace = true`: the hash would then miss a component placed differently.
+7. **Example.** `ISM->GetInstanceTransform(Index, Transform, /*bWorldSpace=*/true)`
+8. **In this project.** `NavReadyContentHash::HashComponents`, once per cell when PCG reports it generated.
+
+## 21. Navmesh tiles and idleness
+
+1. **What it is.** `ARecastNavMesh::GetTileSizeUU()` (the real tile side: `TileSizeUU` truncated to whole cells, `NavigationSystem/Private/NavMesh/RecastNavMesh.cpp:1894–1899`); `ARecastNavMesh::NavMeshOriginOffset` (where the tile grid starts, default the world origin: `Public/NavMesh/RecastNavMesh.h:788–790`); `UNavigationSystemV1::IsNavigationBuildInProgress()` and `HasDirtyAreasQueued()`.
+2. **Why it exists.** Tile layout for streaming and tools; a global "is navigation busy" signal.
+3. **How it works.** `IsNavigationBuildInProgress` asks each navigation data's generator; Recast's answers true while tiles are running or pending (`RecastNavMeshGenerator.cpp:7764–7769`, `NavigationSystem.cpp:4889–4911`). `HasDirtyAreasQueued` is true while areas wait to be turned into dirty tiles (`NavigationSystem.cpp:3561–3564`). Both together mean "nothing queued, nothing building" for the whole world.
+4. **When to use it.** Layout checks; waiting for a settled world (end of a run, a test).
+5. **When not to.** Per-region readiness: both are global, so one busy region hides every finished one (`07`). The per-area check is `HasDirtyTiles(FBox)` (S3).
+6. **Common mistakes.** Assuming `TileSizeUU` is the tile size (1000 gives 988 cm with 19 cm cells). Treating global idleness as "this region is ready".
+7. **Example.** `FMath::IsNearlyEqual(NavMesh->GetTileSizeUU(), 988.0, 0.01)`
+8. **In this project.** The warm-up checks the tiles match the cells; the end of a run waits for idleness before the pocket check. `IsNavigationBuildInProgress` isn't `const`, so the helper that calls it gets the navigation system through `UWorld*`.
+
+## 22. Delegates with a payload
+
+1. **What it is.** Binding extra values to a delegate at bind time: `Delegate.AddUObject(this, &UMyClass::Handler, Payload…)` (`Runtime/Core/Public/Delegates/DelegateSignatureImpl.inl:1020`).
+2. **Why it exists.** One handler for many senders, each identified without a search.
+3. **How it works.** The handler receives the delegate's own parameters first, then the bound values: for `FOnPCGGraphGenerated` (`DECLARE_MULTICAST_DELEGATE_OneParam(…, UPCGComponent*)`, `PCG/Public/PCGComponent.h:57`), `void Handler(UPCGComponent*, int32 CellIndex)`. `AddUObject` holds the object weakly (`TBaseUObjectMethodDelegateInstance` stores a `TWeakObjectPtr`, `Delegates/DelegateInstancesImpl.h:511, 635`): the call is skipped if it has been destroyed.
+4. **When to use it.** Per-sender context that is known at bind time.
+5. **When not to.** Values that change after binding (they are copied at bind time).
+6. **Common mistakes.** Payload parameters placed before the delegate's own; binding a reference payload (it is copied, `std::decay_t`).
+7. **Example.** `Cell->GetPCG()->OnPCGGraphGeneratedDelegate.AddUObject(this, &UNRBenchmarkSubsystem::HandleCellGenerated, Index);`
+8. **In this project.** The director's two PCG handlers, bound per cell with its index.
+
+## 23. Small utilities used in S2
+
+| API | Use here | Note |
+|---|---|---|
+| `FFileHelper::SaveStringToFile`, `FPaths::ProjectSavedDir`, `FPaths::Combine` | the run report `Saved/NRRuns/<tag>.csv` | `Misc/FileHelper.h:196`, `Misc/Paths.h:290`; the writer creates a missing folder (`HAL/FileManagerGeneric.cpp:112–117`) |
+| `FPlatformTime::Seconds()` | generation times | wall-clock seconds (`Windows/WindowsPlatformTime.h:23`) |
+| `Algo::CountIf` | cells generated | `Algo/Count.h:36` |
+| `TArray::StableSort(Predicate)` | components by mesh path | equal keys keep their order (`Containers/Array.h:3704`) |
+| `TConstArrayView<T>`, `FStringView` | hash inputs | non-owning views: no copy; a string view isn't null-terminated |
+| `FMath::RoundToDouble`, `FMath::Fmod` | quantization; the lattice check | |

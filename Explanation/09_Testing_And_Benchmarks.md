@@ -110,3 +110,59 @@ All runs: packaged Development build, `Tools\s1_checks.bat` through the queue (b
 | 10 | 05/06/04 didn't cover the new files | `05` Part B, `06` §7–16, `04` §7–15 |
 
 **Simplify pass** (four angles, done by hand: this project runs no sub-agents), 6 changes, none changing behaviour: one `GetGeneratedComponents` helper instead of two copies of the tag filter (reuse); one `GetNavigation` lookup instead of three (reuse); `enum class EVerdict` instead of `0/1/-1` (simplification); `AllChecksPassed()` used instead of a duplicate expression; the unreachable "PENDING" text removed; the floor-scale expression named once. Efficiency: nothing material (the per-frame retries stop at the first pass and only run in the spike). Altitude: the fixes sit at the right depth (forced exit only on failure because Windows drops the code; reflection because the members are protected; config to remove the crowd manager).
+
+---
+
+## Step S2 · Content and the determinism hash (2026-11-21)
+
+**Question (`03` S2, SC2):** does the same seed give the same content, run to run, with and without the GPU, cooked and uncooked; does another seed change every cell; and does the layout leave every open floor point reachable? **Answer: yes, after one calibration.** The first run found one enclosed sample point; narrowing the jitter removed it (below). The final job passes every check.
+
+All runs: `Tools\s2_checks.bat` through the queue (build both targets → `run_tests.bat NavReadyPCG.Hash` → package → five runs with `run_game.bat … "-NRRun -NRSeed=… -NRRunTag=… -NRExit"`: seed 1 twice, seed 2, seed 1 on the GPU, seed 1 uncooked → `compare_hashes.py`).
+
+### Queue jobs, in order
+
+| Job | Result | What it showed |
+|---|---|---|
+| `20261121_055827_38d320` | ❌ exit 1 (correctly: the comparison failed), 192.5 s | Builds 0 errors / 0 warnings (editor 21.6 s, game 19.6 s); the 5 hash tests pass; cook "Success - 0 error(s), 0 warning(s)", 526 packages. **Determinism: PASS** (table below). **Pocket check: FAIL**: one sample point in cell 15 enclosed, in all four seed-1 runs (seed 2: none). Jitter was ±50 cm |
+| `20261121_070934_305b46` | ✅ exit 0, 204.8 s | **The final S2 code** (jitter ±25 cm, pocket points logged): builds 0 errors / 0 warnings (editor 23.6 s, game 26.4 s); 5 of 5 hash tests; cook 0 / 0, 526 packages; **0 pocket points in every run**; determinism PASS again (seed 1 run hash `0x8CEE4992` in all four runs, seed 2 `0x5C3BCDAF`, 16 of 16 cells differ); `S2 check: PASS` |
+
+### The checks (first job; the final job repeated S2-a to S2-h and S2-j with the same outcome, and passed S2-i)
+
+| # | Check | Result |
+|---|---|---|
+| S2-a | Builds | ✅ editor and game: 0 errors, 0 warnings |
+| S2-b | Unit tests `NavReadyPCG.Hash.*` | ✅ 5 of 5 (`Found 5 automation tests`; `Empty`, `IgnoresFloatNoise`, `OrderIndependent`, `QuaternionSign`, `SeesRealChanges`: Success; exit 0) |
+| S2-c | Package | ✅ 0 errors, 0 warnings |
+| S2-d | Layout facts logged by the director | ✅ both shapes span z −50 to 50 cm around their pivot (the centre: the scale range's premise); 988 cm tiles from the world origin, aligned with the cells; 16/16 cells with props that block navigation |
+| S2-e | Content | ✅ 900 instances in every run; 49 / 56 / 64 per cell (mean 56.2), as the lattice predicts |
+| S2-f | **Same seed, same content** | ✅ seed 1: run a = run b = GPU = uncooked in **16 of 16 cells** (run hash `0x29449002` in all four) |
+| S2-g | **Another seed changes every cell** | ✅ seed 2: content differs in **16 of 16 cells** (run hash `0xA7EE575A`) |
+| S2-h | Instance order (H6) | Observed: the order-dependent hash also matched in all 16 cells of all four seed-1 runs, so PCG produced the same instance order every time here. Reported, not required |
+| S2-i | **No pockets** | First job ❌: cell 15, 1 of 156 open sample points unreachable, in every seed-1 run; seed 2: 0. **Final job ✅: 0 in every run** (149 to 167 open points per cell of 196) |
+| S2-j | Logs | ✅ packaged runs: 0 warnings, 0 errors. Uncooked: 0 errors and the 21 engine-side `LogEditorDataStorageUI` warnings of the editor binary (as in Phase 4, F-3) |
+
+**Timing facts** (functional runs; no timing claims are made from them): the navmesh was complete 0.05–0.28 s after begin play; a cell generated in 2–15 ms from start to done; the pocket check (about 2,500 path queries) took 0.18–0.21 s.
+
+### What the first run taught us
+
+1. **A layout can enclose a pocket even when every gap is wider than the agent.** With ±50 cm of jitter the narrowest gap is about 1 m, wider than the 68 cm agent, but the navmesh closes gaps narrower than about 1.15 m: the 34 cm radius is rounded up to two 19 cm voxels on each side, and rasterization can add up to a voxel more on each side **[inferred]**. One sample point in one cell of one seed was enclosed. **Change:** jitter ±25 cm, so the narrowest gap is about 1.5 m (`02` §14, `05` C3). The run's own check found it; the agents in S4 would otherwise have reported it as path failures.
+2. **Without the GPU, game time runs ahead of the wall clock.** The same path in game time put the last cell's generation at 8.2 s without the GPU, 11.4 s uncooked, and 20.1 s on the GPU (where the path predicts 20.09 s). Without rendering a frame takes well under 0.5 ms, and the world clamps each frame's game time to at least `MinUndilatedFrameTime` = 0.5 ms (`BaseGame.ini:198`, `WorldSettings.cpp:334–343`, `LevelTick.cpp:1599`). So `-nullrhi` runs are for functional checks only; every measurement runs on the GPU (`07`).
+3. **The content hash is stable across builds and RHIs**, and so is the instance order in this workload.
+
+### Audit trail for S2
+
+**`code-review` (medium), 9 findings: 8 fixed, 1 refuted** (4 important, 5 nits). Review of the working-tree diff against `474d40f`, before the first S2 build:
+
+| # | Finding | Outcome |
+|---|---|---|
+| 1 | `run_game.bat`: in `uncooked` mode, `exit /b %ERRORLEVEL%` sat inside an `if ( … )` block, which cmd expands when it reads the block, so a failed uncooked run returned 0; with no editor start, `compare_hashes.py` could read an old log | **Fixed:** each launch on its own line (`goto :uncooked`); the old log is deleted first. Reproduced: 0 inside a block, 3 with the `goto` (`07`) |
+| 2 | Props too low to block: centre-pivot shapes on the floor stand 50 cm × scale tall, so at scale 0.6 (30 cm) they are under the 35 cm step height, and their tops fall inside the pocket query band | **Fixed:** scale 0.9–1.4 (45–70 cm); jitter ±0.5 m so every gap stays ≥ about 1 m; the director logs the meshes' bounds so the pivot is a recorded fact (`02` §14, `05` C3) |
+| 3 | The pocket check trusted one idle navigation frame (S1 required two) | **Fixed:** `RequiredIdleFrames = 2` in a row |
+| 4 | A run passed even if no prop reached navigation (S1's carve check was gone) | **Fixed:** the run also needs props in every cell and at least one blocked sample point per cell |
+| 5 | Delegates were bound, and `FinishSpawning` called, before the cell's record existed | **Fixed:** record and cell first |
+| 6 | A cell generating before the flight would get a time measured from 0 (boot) | **Fixed:** it is logged as an error and fails the run |
+| 7 | `compare_hashes.py` crashed on a missing log; an empty reference gave a misleading message | **Fixed:** reported as failures; self-test re-run |
+| 8 | `run_tests.bat` would pass if the filter matched no test | **Refuted by the source:** zero matches is an error unless a command allows it (`bAllowZeroTestResults` defaults to false, `AutomationCommandline.cpp:346–355, 868`), and errors make `Quit` exit −1 (`:491–504`) |
+| 9 | `-NRSeed` could overflow `BaseSeed × 100`; `-NRRunTag` could write outside `Saved/NRRuns` | **Fixed:** seed clamped to 0–1,000,000; tag through `FPaths::MakeValidFileName` |
+
+**Simplify pass** (four angles, done by hand: this project runs no sub-agents): one `NRBench::ArenaCorner()` instead of two copies of the corner arithmetic (reuse); the header's command-line notes brought up to date. Efficiency: the pocket check runs about 2,500 path queries once, after the measurement, in about 0.2 s (above). Altitude: global idleness is used only by the director at the end of a run; per-cell readiness belongs to the plugin (S3), which must not use it (`07`).

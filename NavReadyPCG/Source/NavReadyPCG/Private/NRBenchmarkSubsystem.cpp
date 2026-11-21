@@ -2,6 +2,7 @@
 
 #include "NRBenchmarkSubsystem.h"
 
+#include "Algo/Count.h"
 #include "Camera/CameraActor.h"
 #include "Components/BoxComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
@@ -11,9 +12,14 @@
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/PlatformMisc.h"
+#include "HAL/PlatformTime.h"
 #include "Misc/CommandLine.h"
+#include "Misc/Crc.h"
+#include "Misc/FileHelper.h"
 #include "Misc/Parse.h"
+#include "Misc/Paths.h"
 #include "NavMesh/NavMeshBoundsVolume.h"
+#include "NavMesh/RecastNavMesh.h"
 #include "NavigationData.h"
 #include "NavigationSystem.h"
 #include "NavigationSystemTypes.h"
@@ -29,45 +35,89 @@ DEFINE_LOG_CATEGORY_STATIC(LogNRBench, Log, All);
 
 namespace NRBench
 {
-	/** The arena is built 1 km from the world origin, away from the template map's own floor. Floor top at z = 0. */
-	const FVector ArenaCenter(100000.0, 0.0, 0.0);
+	/**
+	 * The navmesh tile side with the engine defaults: TileSizeUU 1000 truncated to whole 19 cm voxels, 52 x 19 = 988 cm
+	 * (ARecastNavMesh::GetTileSizeUU). Tiles start at the world origin. Checked against the real navmesh at warm-up.
+	 */
+	constexpr double NavTileSize = 988.0;
+	/**
+	 * The arena is built about 1 km from the world origin (away from the template map's floor), on a tile corner, and one
+	 * tile off the X axis so that no cell edge lies on the Volume Sampler's 4 m lattice (see SpawnCells). Floor top at z = 0.
+	 */
+	const FVector ArenaCenter(101.0 * NavTileSize, NavTileSize, 0.0);
 	/** Half the side of the square arena, in cm (a 200 m x 200 m floor). */
 	constexpr double ArenaHalfSize = 10000.0;
 	constexpr double FloorThickness = 10.0;
 	/** Navigation bounds reach this far above and below the floor, in cm. */
 	constexpr double NavBoundsHalfHeight = 500.0;
-	/** The engine's 1 m cube: its scale is in units of 100 cm. */
-	const TCHAR* const CubeMeshPath = TEXT("/Engine/BasicShapes/Cube.Cube");
-	constexpr double CubeSize = 100.0;
+	/** The engine's 1 m shapes (scale is in units of 100 cm). The first is also the floor. */
+	const TCHAR* const PropMeshPaths[] = { TEXT("/Engine/BasicShapes/Cube.Cube"), TEXT("/Engine/BasicShapes/Cylinder.Cylinder") };
+	constexpr double ShapeSize = 100.0;
 
-	/** S1 test cell: 30 m x 30 m, 1 m tall box standing on the floor, at the arena centre. */
-	const FVector TestCellHalfExtent(1500.0, 1500.0, 50.0);
+	/**
+	 * The cells: a 4 x 4 grid of 1 m tall boxes standing on the floor, centred in the arena. Each cell is exactly 3 x 3
+	 * navmesh tiles (29.64 m), so no tile lies in two cells (only a prop at a cell's edge can dirty a neighbour's tile).
+	 */
+	constexpr int32 GridSide = 4;
+	constexpr double CellSize = 3.0 * NavTileSize;
+	constexpr double CellHeight = 100.0;
 	constexpr double GenerationRadius = 3500.0;
+	/** Cell seeds: BaseSeed * 100 + cell index, so a different base seed changes every cell. */
+	constexpr int32 SeedStride = 100;
 
-	/** Camera: starts 70 m before the cell (outside its generation radius) and flies towards it at 5 m/s, 15 m up. */
-	constexpr double CameraStartOffset = 7000.0;
-	constexpr double CameraSpeed = 500.0;
+	/**
+	 * The camera path, along the arena's X axis through its centre, 15 m up, looking ahead and down: a cruise (one grid
+	 * column comes into range at a time), then a burst (the last two columns come into range within about 4 s).
+	 */
+	constexpr double PathStartX = -11000.0;
+	constexpr double BurstStartX = -5000.0;
+	constexpr double PathEndX = 11000.0;
+	constexpr double CruiseSpeed = 400.0;
+	constexpr double BurstSpeed = 1200.0;
 	constexpr double CameraHeight = 1500.0;
 	constexpr double CameraPitchDegrees = -45.0;
 
-	/** After generation, navigation must report idle for this many consecutive frames before the carve check reads it
-	 *  (one idle frame can be a gap between tile tasks). */
-	constexpr int32 RequiredIdleFrames = 2;
-	/** Corner-to-corner path test, 5 m inside the arena edges, 50 cm above the floor. */
+	/** Warm-up gate: a corner-to-corner path, 5 m inside the arena edges, 50 cm above the floor. */
 	constexpr double PathInset = 500.0;
 	constexpr double QueryHeight = 50.0;
-	/** Carve check: query 10 cm above the floor, 5 cm sideways and 20 cm up/down, so only floor-level navmesh right under the
-	 *  point counts (a walkable patch Recast may leave on top of a 1 m prop is out of range). */
-	constexpr double CarveQueryHeight = 10.0;
-	const FVector CarveQueryExtent(5.0, 5.0, 20.0);
-	/** A point half-way between two neighbouring props (the sampler spacing is 3 m). */
-	constexpr double BetweenPropsOffset = 150.0;
-	/** Frames to wait after the verdict before quitting, so the log is flushed. */
+	/**
+	 * Pocket check: a 14 x 14 grid of points per cell (about 2.1 m apart), each projected onto the navmesh from 10 cm above
+	 * the floor within a box of +-5 cm horizontally and +-20 cm vertically. That box finds the floor's navmesh but not the
+	 * tops of props (45 cm or taller, NRGraphFactory::FRockFieldParams), and fails where a prop stands; a point that
+	 * projects but can't be reached is a pocket.
+	 */
+	constexpr int32 PocketSamplesPerSide = 14;
+	constexpr double PocketQueryHeight = 10.0;
+	const FVector PocketQueryExtent(5.0, 5.0, 20.0);
+	/**
+	 * Settling: at least this long (world time) after the last cell generated, so its props have reached navigation, and
+	 * then this many idle navigation frames in a row (one idle frame can be a gap between tile tasks).
+	 */
+	constexpr double SettleSeconds = 1.0;
+	constexpr int32 RequiredIdleFrames = 2;
+	/** Command-line limits: the seed so that BaseSeed * SeedStride + index stays far inside int32. */
+	constexpr int32 MaxBaseSeed = 1000000;
 	constexpr int32 ExitDelayFrames = 3;
 
-	const TCHAR* PassText(bool bPassed) { return bPassed ? TEXT("PASS") : TEXT("FAIL"); }
+	/** Camera X along the path, FlightSeconds after the flight started. */
+	double CameraX(double FlightSeconds)
+	{
+		const double CruiseSeconds = (BurstStartX - PathStartX) / CruiseSpeed;
+		if (FlightSeconds <= CruiseSeconds)
+		{
+			return PathStartX + CruiseSpeed * FMath::Max(0.0, FlightSeconds);
+		}
+		return FMath::Min(PathEndX, BurstStartX + BurstSpeed * (FlightSeconds - CruiseSeconds));
+	}
 
-	/** The world's navigation system and its default navigation data; either can be null (then nothing can be queried yet). */
+	/** A corner of the arena, PathInset inside its edges and QueryHeight above the floor: -1 the near corner, +1 the far one. */
+	FVector ArenaCorner(double Sign)
+	{
+		const double Reach = Sign * (ArenaHalfSize - PathInset);
+		return ArenaCenter + FVector(Reach, Reach, QueryHeight);
+	}
+
+	/** The world's default navigation data, or nullptr. OutNavSys is the navigation system, or nullptr. */
 	const ANavigationData* GetNavigation(UWorld* World, UNavigationSystemV1*& OutNavSys)
 	{
 		OutNavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
@@ -85,66 +135,43 @@ void UNRBenchmarkSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	Super::OnWorldBeginPlay(InWorld);
 
 	const TCHAR* CommandLine = FCommandLine::Get();
-	bSpike = FParse::Param(CommandLine, TEXT("NRSpike"));
-	bExitWhenDone = FParse::Param(CommandLine, TEXT("NRExit"));
-	FParse::Value(CommandLine, TEXT("NRTimeout="), TimeoutSeconds);
-	if (!bSpike)
+	if (!FParse::Param(CommandLine, TEXT("NRRun")))
 	{
 		return; // No workload requested: the world behaves like the plain template map.
 	}
+	bExitWhenDone = FParse::Param(CommandLine, TEXT("NRExit"));
+	FParse::Value(CommandLine, TEXT("NRSeed="), BaseSeed);
+	FParse::Value(CommandLine, TEXT("NRRunTag="), RunTag);
+	FParse::Value(CommandLine, TEXT("NRTimeout="), TimeoutSeconds);
+	BaseSeed = FMath::Clamp(BaseSeed, 0, NRBench::MaxBaseSeed);
+	RunTag = FPaths::MakeValidFileName(RunTag, TEXT('_')); // the tag names the report file: no folders, no '..'
 
 	BeginPlayTime = InWorld.GetTimeSeconds();
-	if (!BuildArena(InWorld) || !SpawnTestCell(InWorld))
+	if (!BuildArena(InWorld) || !SpawnCells(InWorld))
 	{
-		FinishChecks(0.0); // Nothing can be checked; the summary reports every check as failed.
+		FinishRun(TEXT("set-up failed"), /*bCompleted=*/false);
 		return;
 	}
 
 	Camera = InWorld.SpawnActor<ACameraActor>();
 	UpdateCamera(0.0);
-	UE_LOG(LogNRBench, Display, TEXT("NRSpike: arena built; camera starts %.0f cm from the cell, generation radius %.0f cm."),
-		CameraDistanceToCell(), NRBench::GenerationRadius);
-}
-
-bool UNRBenchmarkSubsystem::SpawnTestCell(UWorld& World)
-{
-	NRGraphFactory::FRockFieldParams GraphParams;
-	GraphParams.Mesh = TSoftObjectPtr<UStaticMesh>(CubeMesh.Get());
-	GraphParams.bNavigationVisible = true; // S1 proves the props reach navigation without any coordination.
-	Graph = NRGraphFactory::BuildRockFieldGraph(this, GraphParams);
-	if (!Graph)
-	{
-		return false; // BuildRockFieldGraph has logged why.
-	}
-
-	// Deferred spawn: the PCG component registers with the PCG subsystem in BeginPlay, so it must be configured first.
-	const FVector CellLocation = NRBench::ArenaCenter + FVector(0.0, 0.0, NRBench::TestCellHalfExtent.Z);
-	ANRCellActor* Cell = World.SpawnActorDeferred<ANRCellActor>(ANRCellActor::StaticClass(), FTransform(CellLocation),
-		nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
-	if (!Cell)
-	{
-		UE_LOG(LogNRBench, Error, TEXT("NRSpike: could not spawn the test cell."));
-		return false;
-	}
-	if (!Cell->Configure(Graph, /*Seed=*/1, NRBench::TestCellHalfExtent, NRBench::GenerationRadius))
-	{
-		Cell->Destroy(); // Never leave a half-spawned (deferred, unfinished) actor in the world.
-		return false;
-	}
-	Cell->GetPCG()->OnPCGGraphStartGeneratingDelegate.AddUObject(this, &UNRBenchmarkSubsystem::HandleCellGenerationStarted);
-	Cell->GetPCG()->OnPCGGraphGeneratedDelegate.AddUObject(this, &UNRBenchmarkSubsystem::HandleCellGenerated);
-	Cell->FinishSpawning(FTransform(CellLocation));
-	TestCell = Cell;
-	return true;
+	Phase = EPhase::WaitingForNavmesh;
+	UE_LOG(LogNRBench, Display, TEXT("NRRun '%s': %d cells, base seed %d; waiting for the navmesh."), *RunTag, Cells.Num(), BaseSeed);
 }
 
 bool UNRBenchmarkSubsystem::BuildArena(UWorld& World)
 {
-	CubeMesh = LoadObject<UStaticMesh>(nullptr, NRBench::CubeMeshPath);
-	if (!CubeMesh)
+	for (const TCHAR* Path : NRBench::PropMeshPaths)
 	{
-		UE_LOG(LogNRBench, Error, TEXT("NRSpike: %s not found (is /Engine/BasicShapes cooked?)."), NRBench::CubeMeshPath);
-		return false;
+		UStaticMesh* Mesh = LoadObject<UStaticMesh>(nullptr, Path);
+		if (!Mesh)
+		{
+			UE_LOG(LogNRBench, Error, TEXT("NRRun: %s not found (is /Engine/BasicShapes cooked?)."), Path);
+			return false;
+		}
+		PropMeshes.Add(Mesh);
+		const FBox Bounds = Mesh->GetBoundingBox();
+		UE_LOG(LogNRBench, Display, TEXT("NRRun: prop mesh %s, bounds z %.1f to %.1f cm around its pivot."), Path, Bounds.Min.Z, Bounds.Max.Z);
 	}
 
 	FActorSpawnParameters SpawnParams;
@@ -156,13 +183,13 @@ bool UNRBenchmarkSubsystem::BuildArena(UWorld& World)
 	AStaticMeshActor* Floor = World.SpawnActor<AStaticMeshActor>(FloorLocation, FRotator::ZeroRotator, SpawnParams);
 	if (!Floor)
 	{
-		UE_LOG(LogNRBench, Error, TEXT("NRSpike: could not spawn the floor."));
+		UE_LOG(LogNRBench, Error, TEXT("NRRun: could not spawn the floor."));
 		return false;
 	}
 	Floor->SetMobility(EComponentMobility::Movable);
-	Floor->GetStaticMeshComponent()->SetStaticMesh(CubeMesh);
-	const double FloorScale = 2.0 * NRBench::ArenaHalfSize / NRBench::CubeSize;
-	Floor->SetActorScale3D(FVector(FloorScale, FloorScale, NRBench::FloorThickness / NRBench::CubeSize));
+	Floor->GetStaticMeshComponent()->SetStaticMesh(PropMeshes[0]);
+	const double FloorScale = 2.0 * NRBench::ArenaHalfSize / NRBench::ShapeSize;
+	Floor->SetActorScale3D(FVector(FloorScale, FloorScale, NRBench::FloorThickness / NRBench::ShapeSize));
 
 	// Navigation bounds. A bounds volume spawned at runtime has no brush geometry (the editor builds that), so its bounds
 	// come from an added box component; navigation reads the volume's components bounding box.
@@ -170,7 +197,7 @@ bool UNRBenchmarkSubsystem::BuildArena(UWorld& World)
 	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(&World);
 	if (!Volume || !NavSys)
 	{
-		UE_LOG(LogNRBench, Error, TEXT("NRSpike: navigation bounds volume %s, navigation system %s."),
+		UE_LOG(LogNRBench, Error, TEXT("NRRun: navigation bounds volume %s, navigation system %s."),
 			Volume ? TEXT("ok") : TEXT("missing"), NavSys ? TEXT("ok") : TEXT("missing"));
 		return false;
 	}
@@ -186,20 +213,163 @@ bool UNRBenchmarkSubsystem::BuildArena(UWorld& World)
 	// (01b_Research_Findings.md #8). It registers itself in BeginPlay.
 	if (!World.SpawnActor<APCGWorldActor>(APCGWorldActor::StaticClass(), FTransform::Identity, SpawnParams))
 	{
-		UE_LOG(LogNRBench, Error, TEXT("NRSpike: could not spawn the PCG world actor."));
+		UE_LOG(LogNRBench, Error, TEXT("NRRun: could not spawn the PCG world actor."));
 		return false;
 	}
 	return true;
 }
 
-void UNRBenchmarkSubsystem::UpdateCamera(double Elapsed)
+bool UNRBenchmarkSubsystem::SpawnCells(UWorld& World)
+{
+	NRGraphFactory::FRockFieldParams GraphParams;
+	for (UStaticMesh* Mesh : PropMeshes)
+	{
+		GraphParams.Meshes.Add(TSoftObjectPtr<UStaticMesh>(Mesh));
+	}
+	GraphParams.bNavigationVisible = true; // Every configuration up to S4 is a baseline: props reach navigation directly.
+	Graph = NRGraphFactory::BuildRockFieldGraph(this, GraphParams);
+	if (!Graph)
+	{
+		return false; // BuildRockFieldGraph has logged why.
+	}
+
+	// The Volume Sampler samples a world-aligned lattice (multiples of VoxelSize), so a cell edge exactly on it would give
+	// the same point to both cells. The arena's placement avoids that; checked here in case a constant changes.
+	const double GridMin = -0.5 * NRBench::GridSide * NRBench::CellSize;
+	for (int32 Edge = 0; Edge <= NRBench::GridSide; ++Edge)
+	{
+		const FVector EdgePoint = NRBench::ArenaCenter + FVector(GridMin + Edge * NRBench::CellSize);
+		for (int32 Axis = 0; Axis < 2; ++Axis)
+		{
+			const double Remainder = FMath::Abs(FMath::Fmod(EdgePoint[Axis], GraphParams.VoxelSize[Axis]));
+			if (FMath::Min(Remainder, GraphParams.VoxelSize[Axis] - Remainder) < 1.0)
+			{
+				UE_LOG(LogNRBench, Error, TEXT("NRRun: a cell edge (%.0f cm on axis %d) lies on the %.0f cm sampling lattice."),
+					EdgePoint[Axis], Axis, GraphParams.VoxelSize[Axis]);
+				return false;
+			}
+		}
+	}
+
+	const FVector HalfExtent(0.5 * NRBench::CellSize, 0.5 * NRBench::CellSize, 0.5 * NRBench::CellHeight);
+	const double GridOffset = 0.5 * (NRBench::GridSide - 1);
+	for (int32 Row = 0; Row < NRBench::GridSide; ++Row)
+	{
+		for (int32 Column = 0; Column < NRBench::GridSide; ++Column)
+		{
+			const int32 Index = Records.Num();
+			const FVector Location = NRBench::ArenaCenter
+				+ FVector((Column - GridOffset) * NRBench::CellSize, (Row - GridOffset) * NRBench::CellSize, HalfExtent.Z);
+			const int32 Seed = BaseSeed * NRBench::SeedStride + Index;
+
+			// Deferred spawn: the PCG component registers with the PCG subsystem in BeginPlay, so it must be configured first.
+			ANRCellActor* Cell = World.SpawnActorDeferred<ANRCellActor>(ANRCellActor::StaticClass(), FTransform(Location),
+				nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+			if (!Cell)
+			{
+				UE_LOG(LogNRBench, Error, TEXT("NRRun: could not spawn cell %d."), Index);
+				return false;
+			}
+			if (!Cell->Configure(Graph, Seed, HalfExtent, NRBench::GenerationRadius))
+			{
+				Cell->Destroy(); // Never leave a half-spawned (deferred, unfinished) actor in the world.
+				return false;
+			}
+			// The record and the cell exist before the delegates are bound, so a handler can never index past them.
+			FCellRecord& Record = Records.AddDefaulted_GetRef();
+			Record.Grid = FIntPoint(Column, Row);
+			Record.Seed = Seed;
+			Cells.Add(Cell);
+			Cell->GetPCG()->OnPCGGraphStartGeneratingDelegate.AddUObject(this, &UNRBenchmarkSubsystem::HandleCellGenerationStarted, Index);
+			Cell->GetPCG()->OnPCGGraphGeneratedDelegate.AddUObject(this, &UNRBenchmarkSubsystem::HandleCellGenerated, Index);
+			Cell->FinishSpawning(FTransform(Location));
+		}
+	}
+	return true;
+}
+
+bool UNRBenchmarkSubsystem::IsArenaNavigable() const
+{
+	UNavigationSystemV1* NavSys = nullptr;
+	const ANavigationData* NavData = NRBench::GetNavigation(GetWorld(), NavSys);
+	if (!NavData)
+	{
+		return false;
+	}
+	const FPathFindingResult Result = NavSys->FindPathSync(FPathFindingQuery(this, *NavData, NRBench::ArenaCorner(-1.0), NRBench::ArenaCorner(1.0)));
+	return Result.IsSuccessful() && !Result.IsPartial();
+}
+
+bool UNRBenchmarkSubsystem::AreTilesAlignedWithCells() const
+{
+	UNavigationSystemV1* NavSys = nullptr;
+	const ARecastNavMesh* NavMesh = Cast<ARecastNavMesh>(NRBench::GetNavigation(GetWorld(), NavSys));
+	if (!NavMesh)
+	{
+		UE_LOG(LogNRBench, Error, TEXT("NRRun: the default navigation data is not a Recast navmesh."));
+		return false;
+	}
+	const double TileSize = NavMesh->GetTileSizeUU();
+	const bool bAligned = FMath::IsNearlyEqual(TileSize, NRBench::NavTileSize, 0.01) && NavMesh->NavMeshOriginOffset.IsNearlyZero();
+	if (!bAligned)
+	{
+		UE_LOG(LogNRBench, Error, TEXT("NRRun: the cells assume %.0f cm navmesh tiles starting at the world origin; the navmesh has %.2f cm tiles, origin offset %s."),
+			NRBench::NavTileSize, TileSize, *NavMesh->NavMeshOriginOffset.ToString());
+	}
+	return bAligned;
+}
+
+bool UNRBenchmarkSubsystem::IsNavigationIdle() const
+{
+	UNavigationSystemV1* NavSys = nullptr;
+	return NRBench::GetNavigation(GetWorld(), NavSys) && !NavSys->HasDirtyAreasQueued() && !NavSys->IsNavigationBuildInProgress();
+}
+
+void UNRBenchmarkSubsystem::CheckPockets()
+{
+	UNavigationSystemV1* NavSys = nullptr;
+	const ANavigationData* NavData = NRBench::GetNavigation(GetWorld(), NavSys);
+	if (!NavData)
+	{
+		return;
+	}
+	const FVector Start = NRBench::ArenaCorner(-1.0);
+	for (int32 Index = 0; Index < Records.Num(); ++Index)
+	{
+		FCellRecord& Record = Records[Index];
+		const FBox Bounds = Cells[Index]->GetCellBounds();
+		const FVector Step = Bounds.GetSize() / NRBench::PocketSamplesPerSide;
+		for (int32 X = 0; X < NRBench::PocketSamplesPerSide; ++X)
+		{
+			for (int32 Y = 0; Y < NRBench::PocketSamplesPerSide; ++Y)
+			{
+				const FVector Point(Bounds.Min.X + (X + 0.5) * Step.X, Bounds.Min.Y + (Y + 0.5) * Step.Y,
+					NRBench::ArenaCenter.Z + NRBench::PocketQueryHeight);
+				FNavLocation OnNavmesh;
+				if (!NavSys->ProjectPointToNavigation(Point, OnNavmesh, NRBench::PocketQueryExtent, NavData))
+				{
+					continue; // a prop stands here
+				}
+				++Record.NavPoints;
+				const FPathFindingResult Result = NavSys->FindPathSync(FPathFindingQuery(this, *NavData, Start, OnNavmesh.Location));
+				if (!Result.IsSuccessful() || Result.IsPartial())
+				{
+					++Record.PocketPoints;
+					UE_LOG(LogNRBench, Display, TEXT("NRRun: pocket point in cell %d at (%.0f, %.0f) cm: no complete path reaches it."),
+						Index, OnNavmesh.Location.X, OnNavmesh.Location.Y);
+				}
+			}
+		}
+	}
+}
+
+void UNRBenchmarkSubsystem::UpdateCamera(double FlightSeconds)
 {
 	if (!Camera)
 	{
 		return;
 	}
-	const FVector Location = NRBench::ArenaCenter
-		+ FVector(-NRBench::CameraStartOffset + NRBench::CameraSpeed * Elapsed, 0.0, NRBench::CameraHeight);
+	const FVector Location = NRBench::ArenaCenter + FVector(NRBench::CameraX(FlightSeconds), 0.0, NRBench::CameraHeight);
 	Camera->SetActorLocationAndRotation(Location, FRotator(NRBench::CameraPitchDegrees, 0.0, 0.0));
 
 	// Re-applied every frame: possessing a pawn would otherwise reset the view target. The PCG generation source is the
@@ -211,181 +381,173 @@ void UNRBenchmarkSubsystem::UpdateCamera(double Elapsed)
 	}
 }
 
-double UNRBenchmarkSubsystem::CameraDistanceToCell() const
+void UNRBenchmarkSubsystem::HandleCellGenerationStarted(UPCGComponent* Component, int32 CellIndex)
 {
-	if (!Camera || !TestCell)
+	if (Phase != EPhase::Flying && Phase != EPhase::Settling)
 	{
-		return -1.0;
+		// Times are measured from the flight's start, so they would be meaningless; and the workload would differ.
+		UE_LOG(LogNRBench, Error, TEXT("NRRun: cell %d started generating before the camera's flight."), CellIndex);
+		bGeneratedOutsideFlight = true;
 	}
-	const FBox Box = TestCell->GetCellBounds();
-	FVector Point = Camera->GetActorLocation();
-	Point.Z = Box.Min.Z;
-	return FMath::Sqrt(Box.ComputeSquaredDistanceToPoint(Point));
+	Records[CellIndex].GenerationStart = FPlatformTime::Seconds() - FlightStartWallTime;
 }
 
-void UNRBenchmarkSubsystem::HandleCellGenerationStarted(UPCGComponent* Component)
+void UNRBenchmarkSubsystem::HandleCellGenerated(UPCGComponent* Component, int32 CellIndex)
 {
-	GenerationStartDistance = CameraDistanceToCell();
-	UE_LOG(LogNRBench, Display, TEXT("NRSpike: runtime generation started, camera %.0f cm from the cell (radius %.0f cm)."),
-		GenerationStartDistance, NRBench::GenerationRadius);
-}
+	FCellRecord& Record = Records[CellIndex];
+	Record.GenerationDone = FPlatformTime::Seconds() - FlightStartWallTime;
 
-void UNRBenchmarkSubsystem::HandleCellGenerated(UPCGComponent* Component)
-{
-	GeneratedInstances = 0;
 	TArray<UInstancedStaticMeshComponent*> Generated;
-	TestCell->GetGeneratedComponents(Generated);
-	for (const UInstancedStaticMeshComponent* ISM : Generated)
-	{
-		GeneratedInstances += ISM->GetInstanceCount();
-	}
-
-	// Pass: generation started inside the radius but not at the very start (the camera began outside it), and produced props.
-	const bool bStartedInRange = GenerationStartDistance >= 0.0 && GenerationStartDistance <= NRBench::GenerationRadius;
-	const bool bStartedLate = GenerationStartDistance < NRBench::CameraStartOffset - NRBench::TestCellHalfExtent.X;
-	GenerationVerdict = (bStartedInRange && bStartedLate && GeneratedInstances > 0) ? EVerdict::Pass : EVerdict::Fail;
-	UE_LOG(LogNRBench, Display, TEXT("NRSpike: generation done, %d instances."), GeneratedInstances);
+	Cells[CellIndex]->GetGeneratedComponents(Generated);
+	Record.Hash = NavReadyContentHash::HashComponents(Generated);
 }
 
-bool UNRBenchmarkSubsystem::CheckArenaPath(FString& OutDetail) const
+int32 UNRBenchmarkSubsystem::CellsGenerated() const
 {
-	UNavigationSystemV1* NavSys = nullptr;
-	const ANavigationData* NavData = NRBench::GetNavigation(GetWorld(), NavSys);
-	if (!NavData)
-	{
-		OutDetail = TEXT("no navigation data");
-		return false;
-	}
-	const double Reach = NRBench::ArenaHalfSize - NRBench::PathInset;
-	const FVector Start = NRBench::ArenaCenter + FVector(-Reach, -Reach, NRBench::QueryHeight);
-	const FVector End = NRBench::ArenaCenter + FVector(Reach, Reach, NRBench::QueryHeight);
-
-	const FPathFindingResult Result = NavSys->FindPathSync(FPathFindingQuery(this, *NavData, Start, End));
-	const bool bComplete = Result.IsSuccessful() && Result.Path.IsValid() && !Result.IsPartial();
-	OutDetail = FString::Printf(TEXT("result %d, partial %s, %d points, length %.0f cm (straight line %.0f cm), navdata %s"),
-		static_cast<int32>(Result.Result), Result.IsPartial() ? TEXT("yes") : TEXT("no"),
-		Result.Path.IsValid() ? Result.Path->GetPathPoints().Num() : 0, Result.Path.IsValid() ? Result.Path->GetLength() : 0.0,
-		FVector::Dist(Start, End), *NavData->GetClass()->GetName());
-	return bComplete;
+	return Algo::CountIf(Records, [](const FCellRecord& Record) { return Record.GenerationDone >= 0.0; });
 }
 
-bool UNRBenchmarkSubsystem::CheckPropCarved(FString& OutDetail) const
+void UNRBenchmarkSubsystem::FinishRun(const TCHAR* Reason, bool bCompleted)
 {
-	UNavigationSystemV1* NavSys = nullptr;
-	const ANavigationData* NavData = NRBench::GetNavigation(GetWorld(), NavSys);
-	TArray<UInstancedStaticMeshComponent*> Generated;
-	TestCell->GetGeneratedComponents(Generated);
-	for (const UInstancedStaticMeshComponent* ISM : Generated)
+	Phase = EPhase::Done;
+	FramesSinceDone = 0;
+
+	int32 Instances = 0;
+	int32 PocketPoints = 0;
+	uint32 RunHash = 0;
+	for (int32 Index = 0; Index < Records.Num(); ++Index)
 	{
-		FTransform Prop;
-		if (NavData && ISM->GetInstanceTransform(0, Prop, /*bWorldSpace=*/true))
-		{
-			const FVector OnProp(Prop.GetLocation().X, Prop.GetLocation().Y, NRBench::CarveQueryHeight);
-			const FVector Between = OnProp + FVector(NRBench::BetweenPropsOffset, 0.0, 0.0);
-			FNavLocation Ignored;
-			const bool bOnPropNavigable = NavSys->ProjectPointToNavigation(OnProp, Ignored, NRBench::CarveQueryExtent, NavData);
-			const bool bBetweenNavigable = NavSys->ProjectPointToNavigation(Between, Ignored, NRBench::CarveQueryExtent, NavData);
-			OutDetail = FString::Printf(TEXT("navmesh under prop 0: %s; half-way to the next prop: %s; ISM navigation-relevant: %s"),
-				bOnPropNavigable ? TEXT("yes") : TEXT("no"), bBetweenNavigable ? TEXT("yes") : TEXT("no"),
-				ISM->IsNavigationRelevant() ? TEXT("yes") : TEXT("no"));
-			return !bOnPropNavigable && bBetweenNavigable;
-		}
+		const FCellRecord& Record = Records[Index];
+		Instances += Record.Hash.NumInstances;
+		PocketPoints += Record.PocketPoints;
+		RunHash = FCrc::TypeCrc32(Record.Hash.ContentHash, RunHash); // chained in cell order: one value to compare runs by
+		UE_LOG(LogNRBench, Display, TEXT("NRRun cell %2d (%d,%d) seed %d: %3d instances, content 0x%08X, ordered 0x%08X, generation %.3f -> %.3f s, pockets %d of %d navmesh points"),
+			Index, Record.Grid.X, Record.Grid.Y, Record.Seed, Record.Hash.NumInstances, Record.Hash.ContentHash,
+			Record.Hash.OrderedHash, Record.GenerationStart, Record.GenerationDone, Record.PocketPoints, Record.NavPoints);
 	}
-	OutDetail = NavData ? TEXT("no generated prop found") : TEXT("no navigation data");
-	return false;
+
+	// Every cell generated, has props, and at least one sample point in it is blocked: the props reached navigation.
+	// (Without the last two, a run whose props lost their collision or navigation flag would still pass.)
+	const int32 Generated = CellsGenerated();
+	const int32 SamplesPerCell = NRBench::PocketSamplesPerSide * NRBench::PocketSamplesPerSide;
+	const int32 CellsWithBlockedPoints = Algo::CountIf(Records, [SamplesPerCell](const FCellRecord& Record)
+		{ return Record.Hash.NumInstances > 0 && Record.NavPoints < SamplesPerCell; });
+	bRunPassed = bCompleted && !bGeneratedOutsideFlight && Records.Num() > 0 && Generated == Records.Num()
+		&& CellsWithBlockedPoints == Records.Num();
+	UE_LOG(LogNRBench, Display, TEXT("NRRun '%s' result (%s): %d/%d cells generated, %d instances, %d pocket points, run content hash 0x%08X."),
+		*RunTag, Reason, Generated, Records.Num(), Instances, PocketPoints, RunHash);
+	UE_LOG(LogNRBench, Display, TEXT("NRRun: %d/%d cells have props that block navigation."), CellsWithBlockedPoints, Records.Num());
+	if (!bRunPassed)
+	{
+		UE_LOG(LogNRBench, Error, TEXT("NRRun: FAILED."));
+	}
+	WriteRunReport();
 }
 
-void UNRBenchmarkSubsystem::TickSpikeChecks(double Elapsed)
+void UNRBenchmarkSubsystem::WriteRunReport() const
 {
-	// Each check is retried every frame until it passes or the run times out. A single attempt could read navigation in a
-	// transient state (the bounds update or a new component's octree registration is deferred to the next navigation tick,
-	// 01b_Research_Findings.md #7) and record a false failure. A pass can't be transient: it needs a complete path, or
-	// floor navmesh beside a prop and none under it.
-	if (NavVerdict == EVerdict::Pending)
+	FString Report = FString::Printf(TEXT("# run=%s base_seed=%d cells=%d generation_radius_cm=%.0f\n"),
+		*RunTag, BaseSeed, Records.Num(), NRBench::GenerationRadius);
+	Report += TEXT("cell,grid_x,grid_y,seed,instances,content_hash,ordered_hash,generation_start_s,generation_done_s,nav_points,pocket_points\n");
+	for (int32 Index = 0; Index < Records.Num(); ++Index)
 	{
-		FString Detail;
-		if (CheckArenaPath(Detail))
-		{
-			NavVerdict = EVerdict::Pass;
-			UE_LOG(LogNRBench, Display, TEXT("NRSpike: arena path at %.2f s: %s"), Elapsed, *Detail);
-		}
+		const FCellRecord& Record = Records[Index];
+		Report += FString::Printf(TEXT("%d,%d,%d,%d,%d,0x%08X,0x%08X,%.6f,%.6f,%d,%d\n"), Index, Record.Grid.X, Record.Grid.Y,
+			Record.Seed, Record.Hash.NumInstances, Record.Hash.ContentHash, Record.Hash.OrderedHash,
+			Record.GenerationStart, Record.GenerationDone, Record.NavPoints, Record.PocketPoints);
 	}
 
-	// The carve check also waits until navigation reports idle for a few frames after generation, so it reads rebuilt tiles.
-	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
-	const bool bNavIdle = NavSys && !NavSys->IsNavigationBuildInProgress() && !NavSys->HasDirtyAreasQueued();
-	CarveIdleFrames = (bNavIdle && GenerationVerdict == EVerdict::Pass) ? CarveIdleFrames + 1 : 0;
-	if (CarveVerdict == EVerdict::Pending && CarveIdleFrames >= NRBench::RequiredIdleFrames)
+	const FString Path = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("NRRuns"), RunTag + TEXT(".csv"));
+	if (FFileHelper::SaveStringToFile(Report, *Path))
 	{
-		FString Detail;
-		if (CheckPropCarved(Detail))
-		{
-			CarveVerdict = EVerdict::Pass;
-			UE_LOG(LogNRBench, Display, TEXT("NRSpike: carve check at %.2f s: %s"), Elapsed, *Detail);
-		}
-		else
-		{
-			LastCarveDetail = Detail; // Reported only if the check never passes.
-		}
+		UE_LOG(LogNRBench, Display, TEXT("Run report written: %s"), *FPaths::ConvertRelativePathToFull(Path));
 	}
-
-	if (AllChecksPassed() || GenerationVerdict == EVerdict::Fail || Elapsed >= TimeoutSeconds)
+	else
 	{
-		FinishChecks(Elapsed);
+		UE_LOG(LogNRBench, Error, TEXT("Could not write the run report: %s"), *Path);
 	}
-}
-
-void UNRBenchmarkSubsystem::FinishChecks(double Elapsed)
-{
-	// Anything still pending at the end failed.
-	for (EVerdict* Verdict : { &NavVerdict, &GenerationVerdict, &CarveVerdict })
-	{
-		*Verdict = (*Verdict == EVerdict::Pass) ? EVerdict::Pass : EVerdict::Fail;
-	}
-	UE_LOG(LogNRBench, Display, TEXT("NRSpike result after %.2f s: navmesh %s, runtime generation %s (started %.0f cm from the cell, %d instances), carve %s."),
-		Elapsed, NRBench::PassText(NavVerdict == EVerdict::Pass), NRBench::PassText(GenerationVerdict == EVerdict::Pass),
-		GenerationStartDistance, GeneratedInstances, NRBench::PassText(CarveVerdict == EVerdict::Pass));
-	if (!AllChecksPassed())
-	{
-		if (CarveVerdict == EVerdict::Fail && !LastCarveDetail.IsEmpty())
-		{
-			UE_LOG(LogNRBench, Display, TEXT("NRSpike: last carve check: %s"), *LastCarveDetail);
-		}
-		UE_LOG(LogNRBench, Error, TEXT("NRSpike: FAILED."));
-	}
-	bChecksDone = true;
 }
 
 void UNRBenchmarkSubsystem::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	if (!bSpike)
+	const UWorld* World = GetWorld();
+	const double Elapsed = World->GetTimeSeconds() - BeginPlayTime;
+	switch (Phase)
 	{
-		return;
-	}
-
-	const double Elapsed = GetWorld()->GetTimeSeconds() - BeginPlayTime;
-	if (!bChecksDone)
-	{
-		UpdateCamera(Elapsed);
-		TickSpikeChecks(Elapsed);
-		return;
-	}
-
-	if (bExitWhenDone && ++FramesSinceDone >= NRBench::ExitDelayFrames)
-	{
-		bExitWhenDone = false; // Request once.
-		if (AllChecksPassed())
+	case EPhase::WaitingForNavmesh:
+		if (IsArenaNavigable())
 		{
-			FPlatformMisc::RequestExit(false, TEXT("UNRBenchmarkSubsystem"));
+			if (!AreTilesAlignedWithCells())
+			{
+				FinishRun(TEXT("the navmesh tiles don't match the cells"), /*bCompleted=*/false);
+				break;
+			}
+			Phase = EPhase::Flying;
+			FlightStartWorldTime = World->GetTimeSeconds();
+			FlightStartWallTime = FPlatformTime::Seconds();
+			UE_LOG(LogNRBench, Display, TEXT("NRRun: navmesh ready after %.2f s (%.0f cm tiles, aligned with the cells); the camera starts its path."),
+				Elapsed, NRBench::NavTileSize);
 		}
-		else
+		else if (Elapsed >= TimeoutSeconds)
 		{
-			// A non-forced exit drops the return code on Windows (it only posts WM_QUIT), so a failed check would exit 0.
-			// The forced exit flushes the log and terminates with code 1, so the queue and scripts see the failure.
-			FPlatformMisc::RequestExitWithStatus(true, 1, TEXT("UNRBenchmarkSubsystem"));
+			FinishRun(TEXT("the navmesh never became navigable"), /*bCompleted=*/false);
 		}
+		break;
+
+	case EPhase::Flying:
+		UpdateCamera(World->GetTimeSeconds() - FlightStartWorldTime);
+		if (CellsGenerated() == Records.Num())
+		{
+			Phase = EPhase::Settling;
+			SettleStartWorldTime = World->GetTimeSeconds();
+			IdleFrames = 0;
+		}
+		else if (Elapsed >= TimeoutSeconds)
+		{
+			FinishRun(TEXT("timeout"), /*bCompleted=*/false);
+		}
+		break;
+
+	case EPhase::Settling:
+		// The last cell's props reach the navigation octree in a later navigation tick, so wait a moment before trusting
+		// "idle"; the pocket check needs the settled navmesh.
+		UpdateCamera(World->GetTimeSeconds() - FlightStartWorldTime);
+		IdleFrames = IsNavigationIdle() ? IdleFrames + 1 : 0;
+		if (World->GetTimeSeconds() - SettleStartWorldTime >= NRBench::SettleSeconds && IdleFrames >= NRBench::RequiredIdleFrames)
+		{
+			const double CheckStart = FPlatformTime::Seconds();
+			CheckPockets();
+			UE_LOG(LogNRBench, Display, TEXT("NRRun: navigation settled %.2f s after the last cell; the pocket check took %.2f s."),
+				World->GetTimeSeconds() - SettleStartWorldTime, FPlatformTime::Seconds() - CheckStart);
+			FinishRun(TEXT("all cells generated"), /*bCompleted=*/true);
+		}
+		else if (Elapsed >= TimeoutSeconds)
+		{
+			FinishRun(TEXT("timeout: navigation never settled"), /*bCompleted=*/false);
+		}
+		break;
+
+	case EPhase::Done:
+		if (bExitWhenDone && ++FramesSinceDone >= NRBench::ExitDelayFrames)
+		{
+			bExitWhenDone = false; // Request once.
+			if (bRunPassed)
+			{
+				FPlatformMisc::RequestExit(false, TEXT("UNRBenchmarkSubsystem"));
+			}
+			else
+			{
+				// A non-forced exit drops the return code on Windows (it only posts WM_QUIT), so a failed run would exit 0.
+				// The forced exit flushes the log and terminates with code 1, so the queue and scripts see the failure.
+				FPlatformMisc::RequestExitWithStatus(true, 1, TEXT("UNRBenchmarkSubsystem"));
+			}
+		}
+		break;
+
+	default:
+		break;
 	}
 }
 
