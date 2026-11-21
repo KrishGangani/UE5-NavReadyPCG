@@ -6,6 +6,7 @@
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/CollisionProfile.h"
 #include "Helpers/PCGHelpers.h"
+#include "NavReadyCellComponent.h"
 #include "PCGComponent.h"
 #include "PCGGraph.h"
 #include "RuntimeGen/SchedulingPolicies/PCGSchedulingPolicyDistanceAndDirection.h"
@@ -53,6 +54,9 @@ ANRCellActor::ANRCellActor()
 
 	PCG = CreateDefaultSubobject<UPCGComponent>(TEXT("PCG"));
 	PCG->GenerationTrigger = EPCGComponentGenerationTrigger::GenerateAtRuntime;
+
+	// Follows the PCG component and registers the cell with NavReady (it finds the PCG component in its BeginPlay).
+	NavReady = CreateDefaultSubobject<UNavReadyCellComponent>(TEXT("NavReady"));
 }
 
 bool ANRCellActor::Configure(UPCGGraph* Graph, int32 Seed, const FVector& HalfExtent, double GenerationRadius)

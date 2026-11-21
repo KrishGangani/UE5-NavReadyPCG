@@ -22,12 +22,17 @@ class UStaticMesh;
  * so PCG's runtime scheduler generates the cells. Every cell's generation times and content hash go into a run report.
  * The S1 spike checks were removed: their results are in 09.
  *
+ * Step S3: the run is also a measurement. NavReady (the plugin) observes every cell until its tiles are rebuilt; the
+ * report gains the commit and ready times, and the CSV capture runs from BenchStart (the flight) to BenchEnd.
+ *
  * Command line (all optional):
  *   -NRRun          build and run the workload (without it the world is the plain template map)
  *   -NRSeed=N       base seed, 0 to 1000000 (default 1); cell i gets seed N * 100 + i
  *   -NRRunTag=NAME  run report file Saved/NRRuns/<NAME>.csv (default "run"; characters not allowed in a file name become _)
  *   -NRTimeout=SEC  give up after this many seconds of world time (default 90)
  *   -NRExit         quit when the run is finished; exit code 1 if the run failed (FinishRun says why)
+ *   -NRConfig=ID    B0 (default: uncoordinated) or NR (NavReady: props spawned navigation-invisible, committed per cell)
+ *   -NRCells=K      spawn only the first K cells, 1 to 16 (default 16); K = 1 isolates one cell's navigation work
  */
 UCLASS()
 class UNRBenchmarkSubsystem : public UTickableWorldSubsystem
@@ -59,6 +64,11 @@ private:
 		double GenerationStart = -1.0;
 		double GenerationDone = -1.0;
 		FNavReadyCellHash Hash;
+		/** NavReady's observations, copied when the run ends: seconds since the flight started (-1 = never). */
+		double CommitTime = -1.0;
+		double ReadyTime = -1.0;
+		int32 DirtiedWhileReady = 0;
+		bool bHashMatchesAtReady = false;
 		/** Pocket check, on the settled navmesh: sample points inside the cell that lie on the navmesh, and how many of them no path reaches. */
 		int32 NavPoints = 0;
 		int32 PocketPoints = 0;
@@ -105,10 +115,15 @@ private:
 
 	int32 CellsGenerated() const;
 
+	/** Cells NavReady reports AIReady (in S3: their tiles are rebuilt). */
+	int32 CellsReady() const;
+
 	// Settings read once from the command line.
 	bool bExitWhenDone = false;
 	int32 BaseSeed = 1;
 	FString RunTag = TEXT("run");
+	FString Config = TEXT("B0");
+	int32 CellCount = 16;
 	double TimeoutSeconds = 90.0;
 
 	EPhase Phase = EPhase::Idle;

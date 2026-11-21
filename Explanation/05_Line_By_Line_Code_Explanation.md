@@ -7,7 +7,8 @@
 | A | Phase 4, F1–F3 (foundation) | `.uproject`, two `Target.cs`, two `Build.cs`, two module `.cpp`, `.uplugin`, three config `.ini`, `Tools\*.bat`, `Tools\cpu_affinity.py` |
 | B | S1 (world spike) | `NRGraphFactory`, `NRCellActor`, `NRBenchmarkSubsystem` (S1 version, replaced in S2), `NavReadyPCG.Build.cs`, config, `Tools\run_packaged.bat`, `s1_checks.bat` (both removed in S2) |
 | C | S2 (content and the determinism hash) | `NavReadyContentHash` and its tests (plugin), `NRGraphFactory` (extended), `NRBenchmarkSubsystem` (S2 version), `NavReadyPCG.Build.cs`, `Tools\run_game.bat`, `run_tests.bat`, `s2_checks.bat`, `compare_hashes.py` |
-| D onwards | S3–S7 | written with each step |
+| D | S3 (readiness observer and harness) | `NavReadyCell`, `NavReadyCellComponent`, `NavReadySubsystem` and their tests (plugin), `NRCellActor` and `NRBenchmarkSubsystem` (S3 changes), `Tools\csv_stats.py`, `run_bench.py`, `check_probe.py`, `s3_checks.bat`, `cpu_affinity.py` |
+| E | S5, final (owner's scope cut) | the NavReady commit, the hash at settle, configuration `NR`, `Tools\s5_checks.bat` |
 
 ---
 
@@ -450,3 +451,126 @@ Pure tests on hand-made transforms: no world, no PCG. Run with `Tools\run_tests.
 | `s2_checks.bat` | Builds, unit tests, package, then five runs (seed 1 twice, seed 2, seed 1 on the GPU, seed 1 uncooked) and the comparison, stopping at the first failure |
 | `compare_hashes.py <folder>` | Reads each run's per-cell log lines and checks SC2 as far as S2 can: identical content across runs, RHIs and builds for the same seed; a different seed changes every cell; every cell generated; no pocket points in any run. Exit 1 on failure. Self-tested on synthetic logs (pass, one changed cell, one pocket) |
 | *Removed:* `s1_checks.bat`, `run_packaged.bat` | Their job (the S1 spike) is done and recorded in `09`; git history keeps them |
+
+---
+
+## Part D · Step S3: the readiness observer and the measurement harness
+
+**What S3 adds:** the plugin's tracking code (a cell's state, the readiness rule, the registry and the per-frame probe), connected to the director's cells, and the scripts that run and summarise benchmark batches. **What S3 does not do yet:** change anything. NavReady only **observes**: in the baselines the props reach navigation when PCG spawns them, so a generated cell is marked committed without touching it, and the probe reports when its tiles are rebuilt. That moment is M1 (time to navigable), measured with the same code that will drive NavReady in S5.
+
+**Files:** plugin `Public\NavReadyCell.h` + `Private\NavReadyCell.cpp` (D1), `Public\NavReadyCellComponent.h` + `.cpp` (D2), `Public\NavReadySubsystem.h` + `.cpp` (D3), `Private\Tests\NavReadyCellTests.cpp` (D4); game `NRCellActor` and `NRBenchmarkSubsystem` (D5); `Tools\csv_stats.py`, `run_bench.py`, `check_probe.py`, `s3_checks.bat`, `cpu_affinity.py` (D6).
+
+### D1. `NavReadyCell.h` / `.cpp` (plugin): the state and the rule, as plain data
+
+| Line | What it does, and why |
+|---|---|
+| `UENUM(BlueprintType) enum class ENavReadyCellState : uint8 { Idle, Generating, Generated, Committed, AIReady }` | One vocabulary for C++, Blueprint (`OnCellStateChanged`), the CSV and the debug view. A `UENUM`, so this header has a `.generated.h` |
+| `struct FNavReadyProbe { bNavigationAvailable, bBuildLocked, bDirtyAreasQueued, bCellHasDirtyTiles }` | What navigation reported this frame for one cell. Plain booleans: the subsystem fills them from the engine, the tests write them by hand |
+| `struct FNavReadyCell` | State, readiness bounds, four timestamps, the commit frame, and the "dirtied while ready" counter. No UObject, so the transitions run in unit tests without a world (`02` §4.1) |
+| `OnGenerationStarted(Now)` | Any state → `Generating`, and the previous generation's times are cleared (a regenerated cell starts over) |
+| `OnGenerated(Now)`, `OnCommitted(Now, Frame)` | Only from `Generating` and `Generated` respectively; both return `false` otherwise, so a stray or late event (a generated event after a cancel) can't skip a state (S3 code review) |
+| `int32 Id` | Given at registration, in registration order, and kept through resets. The CSV events use it, because registry slots move when a cell unregisters |
+| `TrySettle(Probe, Now, Frame)` | `Committed` → `AIReady` when `IsSettled`; returns `true` on that transition only, so the caller broadcasts once |
+| `IsSettled`: `bNavigationAvailable && Frame > CommitFrame && !bBuildLocked && !bDirtyAreasQueued && !bCellHasDirtyTiles` | The readiness rule of `02` §4.1. `Frame > CommitFrame`: navigation ticks before the tick groups (`LevelTick.cpp:1647`) and registers new content in that tick, so nothing committed in frame N can be seen before frame N + 1 |
+| `ObserveWhileReady(Probe)` | Counts each **episode** of dirty tiles in a cell that is already ready (rising edges only). S3 measures how often a neighbour's edge props re-dirty a ready cell, to decide S5's policy with data |
+| `OnReset()` | Cleanup or cancellation: back to `Idle`; the id and the bounds are kept (they belong to the cell, not to one generation) |
+| `#define UE_API NAVREADYPCGCORE_API` on each member | 5.8's export convention, as in `NavReadyContentHash.h` |
+
+### D2. `NavReadyCellComponent.h` / `.cpp` (plugin): the cell
+
+| Line | What it does, and why |
+|---|---|
+| `UCLASS(MinimalAPI, ClassGroup = (NavReady), meta = (BlueprintSpawnableComponent))` | Exported type info only; the members other modules call carry `UE_API`. Spawnable, so a Blueprint actor can carry it |
+| `PrimaryComponentTick.bCanEverTick = false` | The subsystem does every cell's per-frame work in one loop |
+| `BeginPlay`: `GetWorld()->GetSubsystem<UNavReadySubsystem>()`, else return | The subsystem exists only in game and PIE worlds, so in an editor world the component does nothing |
+| `FindComponentByClass<UPCGComponent>()` | The owner's PCG component. Missing → an error and the cell is ignored |
+| Four `AddUObject` bindings: start, generated, cancelled, cleaned | PCG's native delegates (`PCGComponent.h:55–58`, members `:380–383`); cancelled and cleaned both reset the cell |
+| `EndPlay`: `RemoveAll(this)` on all four, then `UnregisterCell` | No dangling bindings; the registry never holds a dead cell (`02` §8) |
+| `GetState()`, `IsAIReady()`, `GetCell()` | Read through the subsystem's registry, so there is one copy of the state |
+
+### D3. `NavReadySubsystem.h` / `.cpp` (plugin): the registry and the probe
+
+| Line | What it does, and why |
+|---|---|
+| `static_assert(WITH_RECAST, …)`, `static_assert(RECAST_ASYNC_REBUILDING, …)` | The probe reads Recast's dirty tiles; every desktop target compiles Recast (`Target.bCompileRecast`, `NavigationSystem.Build.cs:40–43`). And `HasDirtyTiles(FBox)` sees pending and running tiles only, while a tile in the middle of a **time-sliced** rebuild is in neither (the unbounded `HasDirtyTiles()` does count it, `RecastNavMeshGenerator.cpp:6588–6593` vs `:6644–6670`). Time slicing is used only without asynchronous rebuilding, which is the default (`NavMesh/RecastNavMesh.h:28–32`), so the probe requires it (S3 code review) |
+| `TArray<FNavReadyCell> Cells` + `UPROPERTY TArray<TObjectPtr<UNavReadyCellComponent>> Components` | Parallel arrays: the hot loop reads plain data; the UObject array keeps the components visible to GC |
+| `RegisterCell` / `UnregisterCell` | Append; remove with `RemoveAtSwap`. During a broadcast the slot is only emptied, and `Compact()` removes it afterwards, so a listener that destroys a cell can't shift the arrays under the loop |
+| `Notify…` (from the component) | Run the transition and queue a broadcast. They arrive from PCG's tick, outside NavReady's |
+| `Tick`: `CSV_SCOPED_TIMING_STAT_EXCLUSIVE(NavReady)` | NavReady's own cost as `Exclusive/GameThread/NavReady`, subtracted from `Tickables` automatically (M6) |
+| The probe's global part, once per frame: `GetDefaultNavDataInstance(DontCreate)` → `Cast<ARecastNavMesh>` → `static_cast<const FRecastNavMeshGenerator*>(GetGenerator())` | Fetched every frame, never cached: a full rebuild can recreate the generator (`NavigationData.cpp:626`). The `static_cast` is safe only after the `ARecastNavMesh` check |
+| `IsNavigationBuildingLocked()`, `HasDirtyAreasQueued()` | Global, as `02` §12 #2 states (`NavigationSystem.h:1083`, `NavigationSystem.cpp:3561–3564`) |
+| A `Generated` cell, once a generator exists: readiness bounds = the owner's components bounds grown by the navmesh border, then `OnCommitted` | Every tile a change in the cell can mark dirty, including a neighbour's edge tile. The engine grows each dirty area by (high, low) border before marking tiles (`GrowDirtyBounds`, `RecastNavMeshGenerator.cpp:6603–6608`, used at `:6787`; not exported); the exported `GrowBoundingBox` (`:6596–6601`, `.h:836`) grows by (low, high). So the code takes the **larger growth per axis on both sides**, which covers either. Without a generator the cell waits in `Generated`: bounds taken without the border would stay too small for good (S3 code review) |
+| A `Committed` or `AIReady` cell: `HasDirtyTiles(ReadinessBounds)` | Pending or running tile builds inside the box (`RecastNavMeshGenerator.cpp:6644–6670`). A box edge exactly on a tile boundary counts the lower tile only (`FRcTileBox`, `.h:240–257`) |
+| `CSV_EVENT(NavReady, "CellCommitted_%d")`, `"CellReady_%d"` | Frame-exact markers in the capture, used by `check_probe.py`, named by the cell's stable `Id` (cells register in spawn order, so the id equals the director's cell index) |
+| `CSV_CUSTOM_STAT(NavReady, CellsGenerating / CellsGenerated / CellsCommitted / CellsReady / CellsDirtyWhileReady)` | Per-frame counts for the timeline charts |
+| `FlushBroadcasts()` | At the end of the tick, by index and by copy (a listener can queue more), weak pointers (a listener can destroy a cell) |
+
+### D3b. `NavReadyPCGCore.Build.cs`: the `Navmesh` module
+
+`PrivateDependencyModuleNames.Add("Navmesh")`. The probe includes `NavMesh/RecastNavMeshGenerator.h`, which includes Recast's own headers (`Recast/Recast.h`). Those belong to the `Navmesh` module, which `NavigationSystem` depends on **privately** (`NavigationSystem.Build.cs:42`), so depending on `NavigationSystem` doesn't make them visible. The first S3 build stopped on exactly this (`09` S3, `07`).
+
+### D4. `NavReadyCellTests.cpp` (plugin)
+
+| Test | What it proves |
+|---|---|
+| `NavReadyPCG.Cell.NotReadyInCommitFrame` | Never ready in the commit frame, however clear the probe; ready the next frame; only once |
+| `NavReadyPCG.Cell.NotReadyWhileBusy` | Not ready with no navmesh, a lock, queued dirty areas, or dirty tiles in the cell; ready once all clear |
+| `NavReadyPCG.Cell.Transitions` | Only a generated cell commits; regeneration clears the times; reset keeps the bounds |
+| `NavReadyPCG.Cell.DirtyWhileReady` | Counts episodes, not frames |
+
+### D5. Game: `NRCellActor` and `NRBenchmarkSubsystem` (S3 changes)
+
+| Change | Why |
+|---|---|
+| `ANRCellActor`: a `UNavReadyCellComponent` subobject, `GetNavReady()` | Every cell is tracked; the component finds the PCG component itself |
+| `-NRConfig=` (only `B0` in S3) and `-NRCells=K` (1–16) | The configuration is recorded in the report and the CSV metadata. One cell isolates one cell's navigation work for the probe check |
+| Warm-up waits for 2 idle navigation frames as well as a complete path | The arena's first build must be finished before any cell starts, or the first cells' M1 would include it |
+| `CSV_METADATA(NRRunTag / NRConfig / NRSeed)`, `CSV_EVENT(NRBench, "BenchStart")` at the flight's start, `"BenchEnd"` in `FinishRun` (only if the flight started; otherwise the NavReady times stay −1) | The capture covers exactly the flight and the settling; `-csvStartOnEvent` / `-csvStopOnEvent` match the event text (`CsvProfiler.cpp:4759, 4769`) |
+| Settling also waits for every cell to be `AIReady` | NavReady's tick and the director's have no fixed order; without this, the last cell could still read `Committed` on the frame navigation went idle |
+| `FCellRecord`: `CommitTime`, `ReadyTime`, `DirtiedWhileReady`, copied from `FNavReadyCell` in `FinishRun` | One run report with generation and readiness, all relative to the flight's start |
+| The run fails if a cell never reached ready | M1 must exist for every cell |
+
+### D6. `Tools\` (S3)
+
+| Script | Why |
+|---|---|
+| `csv_stats.py` | Adapted from UE5-UpdateBudget: reads a finalised Unreal CSV capture (end header and metadata row), percentiles by linear interpolation, event parsing. Default columns are this project's (frame times, the three exclusive stats, `NavReady/CellsReady`). `--selftest` checks hand-worked values |
+| `run_bench.py` | Real time capped at 60 fps (`t.MaxFPS`), not a fixed step (`02` §14). `--cells` must be 1–16 and `--label` may hold only letters, digits, `-` and `_` (it becomes part of file names and `-NRRunTag`). Adapted from UE5-UpdateBudget: pins itself to the P-cores once (`cpu_affinity.pin_self`), records the environment with the mask read back, one priming run, interleaved runs, the real executable (not the bootstrap) through `cpu_affinity.run_game` (Popen, timeout, kill in `finally`), artefacts moved to `Benchmarks\Raw` without overwriting, manifest after every run, summary per configuration (M1 and settle per cell, frame statistics, NavReady's cost) |
+| `check_probe.py` | The S3 agreement check on a one-cell capture: the frame NavReady reports ready vs. the frame the engine's remaining tile tasks return to 0 after the commit. Tasks already running **in** the commit frame count (in the baselines the props reach navigation while PCG spawns them, before the commit). `--selftest` covers agreement, tolerance, early and late readiness, "no tasks seen", and tasks only in the commit frame |
+| `s3_checks.bat` | Builds, every `NavReadyPCG.*` test, package, the self-tests, a B0 batch (priming + 1), the one-cell run, and the probe check, stopping at the first failure. `:step` collects its arguments with `shift`: `%2 … %9` reach only eight, and the benchmark steps have more (S3 code review; tested with ten) |
+| `cpu_affinity.py`: `run_game` takes a string as well as a list | A string goes to `CreateProcess` as written, which keeps quoted arguments intact |
+
+---
+
+## Part E · Step S5 (final, smallest form): the NavReady commit
+
+**Scope (owner's decision, 2026-11-21):** finish the core feature in its smallest working form. NavReady now **commits** each generated cell itself, hashes it when it settles, and marks it AI-ready; the director runs it as configuration `NR`. Dropped: the measuring agents (M2, M4, M4b), the baselines B1–B3, the debug view and the commit-budget sweep (`03`, `09`).
+
+**Files:** plugin `NavReadyCell.h` and `NavReadySubsystem.cpp` (E1); game `NRBenchmarkSubsystem` (E2); `Tools\run_bench.py`, `s5_checks.bat` (E3).
+
+### E1. The commit and the hash (plugin)
+
+| Line | What it does, and why |
+|---|---|
+| `TAutoConsoleVariable<int32> CVarCommitsPerFrame(TEXT("nr.CommitsPerFrame"), 1, …, ECVF_Default)` | At most this many cells are handed to navigation per frame (at least 1). `ECVF_Default`, because cheat cvars can't be set from config or `-dpcvars` |
+| `NavReadyPrivate::GetGeneratedComponents` | The owner's ISM components that carry PCG's tag (`PCGHelpers::DefaultPCGTag`): exactly what PCG generated |
+| A `Generated` cell, a generator, and budget left: `SetCanEverAffectNavigation(true)` on every generated component that can't yet affect navigation, then `OnCommitted` | **The commit.** In `NR` the spawner created the props navigation-invisible, so navigation saw nothing while the cell was generating; now the whole cell becomes navigation-relevant in one frame, and navigation rebuilds its tiles once. In `B0` the props already affect navigation, so there is nothing to switch and the commit only marks the moment, as in S3 |
+| `NavSys->AddDirtyArea(Instances->Bounds.GetBox(), ENavigationDirtyFlag::All, …)` after the switch | **Found in the final batch:** the switch alone left NR's props invisible to the navmesh (0 of 16 cells blocked). An ISM opts out of the dirty area when it is added to the navigation octree, because it expects per-instance updates (`InstancedStaticMesh.cpp:5513–5519`, honoured at `NavigationDataHandler.cpp:50`); a component that already has its instances therefore never dirties its tiles. The commit now dirties each component's bounds itself. **Not yet verified by a run** (`09`) |
+| `CommitsThisFrame` CSV stat | How many cells were committed in each frame |
+| On `TrySettle`: `Cell.Hash = NavReadyContentHash::HashComponents(…)` | Settle → hash → AI-ready (`02` §2): the hash describes exactly the content the AI is about to use |
+| `FNavReadyCell::Hash` | Stored with the cell; the director compares it with its own hash taken at generation |
+
+### E2. The director (game)
+
+| Change | Why |
+|---|---|
+| `-NRConfig=NR` accepted | `B0` or `NR` |
+| `GraphParams.bNavigationVisible = Config != TEXT("NR")` | The one content difference between the configurations: the spawner's navigation flag, which the hash ignores (`01` §6.2) |
+| `FCellRecord::bHashMatchesAtReady` and the summary line | NavReady's hash at AI-ready must equal the director's hash at generation in every cell |
+
+### E3. Tools
+
+| Script | Why |
+|---|---|
+| `run_bench.py`: `CONFIGS` `B0` and `NR` | The short comparison batch |
+| `s5_checks.bat` | Builds, every `NavReadyPCG.*` test, package, and `run_bench.py --configs "B0,NR" --runs 2` (priming + 2 interleaved runs each). The configuration list is **quoted**: cmd also splits arguments at commas, and the first final job stopped on exactly that (`07`) |

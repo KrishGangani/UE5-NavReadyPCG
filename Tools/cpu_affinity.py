@@ -75,8 +75,9 @@ def applied_mask() -> str:
     return f"0x{process_mask.value:X} (performance cores only; hybrid CPU)"
 
 
-def run_game(command: list[str], timeout_seconds: float) -> int | None:
-    """Runs one timed game process (it inherits this process's affinity). Returns its exit code, or None on timeout."""
+def run_game(command: str | list[str], timeout_seconds: float) -> int | None:
+    """Runs one timed game process (it inherits this process's affinity). Returns its exit code, or None on timeout.
+    A string goes to CreateProcess exactly as written, which keeps quoted arguments intact."""
     process = subprocess.Popen(command)
     try:
         return process.wait(timeout=timeout_seconds)

@@ -166,3 +166,73 @@ All runs: `Tools\s2_checks.bat` through the queue (build both targets → `run_t
 | 9 | `-NRSeed` could overflow `BaseSeed × 100`; `-NRRunTag` could write outside `Saved/NRRuns` | **Fixed:** seed clamped to 0–1,000,000; tag through `FPaths::MakeValidFileName` |
 
 **Simplify pass** (four angles, done by hand: this project runs no sub-agents): one `NRBench::ArenaCorner()` instead of two copies of the corner arithmetic (reuse); the header's command-line notes brought up to date. Efficiency: the pocket check runs about 2,500 path queries once, after the measurement, in about 0.2 s (above). Altitude: global idleness is used only by the director at the end of a run; per-cell readiness belongs to the plugin (S3), which must not use it (`07`).
+
+---
+
+## Step S3 · The readiness observer and the measurement harness (2026-11-21)
+
+**Question (`03` S3):** does NavReady's probe report each cell's "tiles rebuilt" moment correctly, in time to measure M1 for every cell of a B0 run, with the CSV columns the comparison needs? **Answer:** yes for B0 (16 of 16 cells reach ready in every run, M1 measured per cell, all CSV columns present). The one-cell probe-vs-engine agreement check was not run (project closed early).
+
+All runs: `Tools\s3_checks.bat` through the queue (build both targets → every `NavReadyPCG.*` test → package → `csv_stats.py` and `check_probe.py` self-tests → `run_bench.py --configs B0 --runs 1` (priming + 1 run, pinned, real time at 60 fps, real GPU) → `run_bench.py --cells 1 --no-prime` → `check_probe.py` on the one-cell capture).
+
+### Queue jobs, in order (failures included)
+
+| Job | Result | What it showed |
+|---|---|---|
+| `20261121_083650_13fc7a` | ❌ editor build failed, exit 6 (correctly reported) | `RecastNavMeshGenerator.h(21): fatal error C1083: Cannot open include file: 'Recast/Recast.h'`: the Recast headers belong to the `Navmesh` module, which `NavigationSystem` depends on privately. Fixed by adding `Navmesh` to the plugin's private dependencies (`05` D3b, `07`) |
+| *(retry, cancelled when the project was closed early)* | — | Not run; the S3 code was built and run in the final job instead (below) |
+
+### Audit trail for S3
+
+**`code-review` (medium), 10 findings, all fixed** (3 important, 7 nits). Review of the working-tree diff against `1b217ff`, before the first S3 build:
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | `s3_checks.bat`'s `:step` passed `%2 … %9`: eight arguments, so the benchmark steps lost their last options (`--label`, `--cells 1`, `--no-prime`) and the probe check would have found no capture | Arguments collected with `shift` in a loop; tested with ten arguments, one quoted, and with a failing command (`07`) |
+| 2 | `check_probe.py` ignored tile tasks already running in the commit frame, and could call a correct run inconclusive | The commit frame counts; a self-test case for it |
+| 3 | The readiness bounds used `GrowBoundingBox` (low, high), while the engine grows dirty areas by (high, low): narrower on one side if the two differ | The larger growth per axis on both sides (`05` D3) |
+| 4 | `HasDirtyTiles(FBox)` doesn't see a tile in the middle of a time-sliced rebuild | `static_assert(RECAST_ASYNC_REBUILDING)`: time slicing only happens without asynchronous rebuilding, the default (`RecastNavMesh.h:28–32`) |
+| 5 | A cell seen generated while no generator existed got ungrown bounds for good | It waits in `Generated` until a generator exists |
+| 6 | The CSV events used the registry index, which moves when a cell unregisters | A stable `Id` per cell, given at registration |
+| 7 | A run that never started its flight still logged `BenchEnd` and converted NavReady times from 0 | Both only if the flight started; otherwise −1 |
+| 8 | `run_bench.py` accepted `--cells` outside 1–16 and labels with spaces | Both rejected |
+| 9 | The S3 code had no matching `Explanation/` updates yet | `05` Part D, `06` §24–29, `04` §23–27, `07`, `01`/`02`/`03`, `Benchmarks/README.md` in this step |
+| 10 | A late "generated" event after a cancel moved an idle cell to `Generated` | `OnGenerated` only from `Generating`; two test assertions |
+
+**Simplify pass** (by hand): nothing removed. The subsystem's per-frame loop already reads only plain data; the two "ready" counts in the director (live components for the settle wait, copied records for the pass rule) answer different questions, so both stay. Efficiency: `HasDirtyTiles(FBox)` walks the pending and running tile lists for each committed or ready cell (16 cells × at most a few hundred tiles per frame); the cost is measured as `Exclusive/GameThread/NavReady` (SC6). Altitude: the probe lives in the plugin, the director only reads it.
+
+---
+
+## Final step · NavReady in its smallest working form, and the short batch (2026-11-21)
+
+**Owner's direction:** finish now: the core feature in the game, one short batch (B0 vs NR, 2 runs + priming), no further campaigns, no code review.
+
+| Job | Result | What it showed |
+|---|---|---|
+| `20261121_111500_859557` | ❌ exit 2, 116.7 s | Builds ✅ (0 errors, 0 warnings); **9 of 9 automation tests pass** (5 hash + 4 cell); package ✅ (cook 0 errors / 0 warnings). The batch didn't start: an unquoted `B0,NR` was split by cmd at the comma (`07`) |
+| `20261121_111727_dfe693` | ❌ exit 1 | Builds, 9/9 tests and package ✅ again. Batch `2026-11-21_111841_final`: **B0 ✅ in both runs; NR ❌ in both runs**: every cell generated and was hashed (the hash at AI-ready matched the generated content in 16/16 cells), but **0 of 16 cells had props that block navigation**: switching an already populated ISM to navigation-relevant registers it without dirtying its area (`06` §30). Fix written (the commit calls `AddDirtyArea`), **not verified**: the owner's limit of two jobs was reached |
+
+**The batch** (pinned 0xFFFF, real time at 60 fps, RTX 5070 Laptop, 1280×720; raw files `Benchmarks/Raw/2026-11-21_111841_final_*`, summary `Benchmarks/Summaries/2026-11-21_111841_final_summary.md`):
+
+| Metric | B0 (2 runs: median [min–max]) | NR |
+|---|---|---|
+| M1 time to navigable per cell, median | **20.1 ms** [19.7–20.5] | invalid (nothing was rebuilt) |
+| M1 p95 | **28.5 ms** [25.9–31.2] | invalid |
+| Settle (generated → ready), median | 12.9 ms [12.6–13.3] | invalid |
+| `GameThreadTime` p99 | 2.7 ms [2.2–3.3] | 2.2–3.0 ms (but no navmesh work) |
+| `GameThreadTime` max | 237 ms [227–248]: **includes the end-of-run pocket check** (≈ 0.2 s, inside the capture), so M3's worst frame is not measured cleanly | 32–36 ms |
+| NavReady's own cost (`Exclusive/GameThread/NavReady`) | median 0.003 ms, max 0.19–0.22 ms per frame | median 0.003 ms, max 0.23–0.33 ms |
+| Ready cells re-dirtied by a neighbour's edge props | 32 and 35 episodes per run | 0 (invalid) |
+| Content hash | identical in every run (`0x8CEE4992`) | identical to B0 (`0x8CEE4992`): the navigation flag doesn't change the content |
+
+## Success criteria: what the data shows
+
+| # | Criterion | Status |
+|---|---|---|
+| SC1 | AI never paths through unready content | **not measured** (no measuring agents) |
+| SC2 | Determinism | ✅ **met** for what was run: same seed → same hash in 16/16 cells across runs, GPU and no GPU, cooked and uncooked (`09` S2), and across B0 and NR (final batch); another seed changes 16/16 |
+| SC3 | Readiness not slower than B0 | **not measured** (NR's readiness was invalid: its props never reached the navmesh) |
+| SC4 | AI activates promptly | **not measured** |
+| SC5 | No worse worst frame | **not measured** cleanly (the pocket check is inside the capture; NR's navmesh work was missing) |
+| SC6 | Low overhead (median ≤ 0.05 ms, max ≤ 0.50 ms per frame) | ✅ **met** in all four runs: median 0.003 ms, max 0.19–0.33 ms (in NR the commit itself was cheaper than it will be with the fix) |
+| SC7 | Robust | partly: 16/16 cells reached ready in every run; the edge-case tests were not written |

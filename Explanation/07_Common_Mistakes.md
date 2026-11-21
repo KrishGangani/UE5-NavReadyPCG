@@ -45,7 +45,21 @@
 | Props shorter than the agent's step height (found in S2 code review) | They don't block: Recast treats them as steps, and their tops can count as floor. A centre-pivot shape on the floor stands only 50 cm × scale tall | Keep the smallest prop above `AgentMaxStepHeight` (35 cm by default): scale ≥ 0.9 here (`05` C3) |
 | Taking wall-clock timings from a `-nullrhi` run (found in S2) | Game time runs about 2.5 times faster than the wall clock: S2's seed-1 run generated its last cell after 8.2 s without the GPU and 20.1 s with it, for the same path in game time | Without rendering a frame takes well under 0.5 ms, and the world clamps every frame's game time to at least `MinUndilatedFrameTime` = 0.5 ms (`BaseGame.ini:198`, `AWorldSettings::FixupDeltaSeconds`, `WorldSettings.cpp:334–343`, applied every world tick at `LevelTick.cpp:1599`). Use `-nullrhi` for functional checks only; measure on the GPU (`09` S2) |
 | A prop layout whose gaps are only a little wider than the agent | A rare enclosed point: S2's first run had one, in one cell of one seed | Keep the narrowest gap above the agent's width plus the voxel rounding on both sides (`05` C3) |
+| Passing a command's arguments on with `%2 … %9` (found in S3 code review) | Only eight arguments arrive; the rest are dropped without an error, so a benchmark step ran with the wrong options | Collect them with `shift` in a loop (`Tools\s3_checks.bat`, `:step`; tested with ten arguments, one of them quoted) |
+| An unquoted comma in a batch argument (found in the final job) | `--configs B0,NR` arrived as two arguments: `unrecognized arguments: NR` | cmd splits arguments at commas as well as spaces; quote the list (`"B0,NR"`) |
 | `exit /b %ERRORLEVEL%` inside an `if ( … )` block (found in S2 code review) | The script returns the code from **before** the command in the block ran (reproduced: 0 instead of 3), so a failed uncooked run looked fine | cmd expands `%VAR%` when it reads the whole block. Put the command and its `exit /b` on their own lines (`goto` a label), or use delayed expansion `!ERRORLEVEL!` (`05` C6) |
+
+## Tracking readiness (S3)
+
+| Mistake | How to spot it | How to prevent it |
+|---|---|---|
+| Including `NavMesh/RecastNavMeshGenerator.h` with only a `NavigationSystem` dependency (found in S3) | `fatal error C1083: Cannot open include file: 'Recast/Recast.h'` | Add the `Navmesh` module: `NavigationSystem` depends on it privately, so its headers don't reach dependents (`05` D3b) |
+| Making an already populated ISM navigation-relevant and expecting a rebuild (found in the final batch) | NR's cells became "ready" quickly while 0 of 16 had props that blocked the navmesh | An ISM skips the dirty area when it joins the navigation octree (it expects per-instance updates); dirty its bounds yourself with `AddDirtyArea` (`06` §30) |
+| Checking the content's own bounds for dirty tiles | A cell reads ready while a tile next to it, dirtied by one of its edge props, is still building | Grow the bounds by the navmesh border first, as the engine grows each dirty area; take the larger of its two growths on every side, since `GrowBoundingBox` and the engine's `GrowDirtyBounds` swap low and high (`05` D3) |
+| Broadcasting state changes from inside the per-frame loop | A listener that destroys or spawns a cell shifts the arrays mid-loop | Queue changes; broadcast after the loop, by index and by copy; empty slots instead of removing during the broadcast (`04` §24) |
+| Letting the director and NavReady disagree about "done" | The director finishes on the frame navigation goes idle, before NavReady's tick that frame: the last cell still reads `Committed` | Wait for both: idle navigation and every cell `AIReady` (`05` D5) |
+| Starting the measurement while the arena's first navmesh build is still running | The first cells' time to navigable includes tiles they never touched | Warm-up waits for a complete path and 2 idle navigation frames (`05` D5) |
+| Validating the probe with several cells building at once | The engine's task count returns to 0 only when **all** of them are done, so it can't confirm one cell's moment | Validate with one cell (`-NRCells=1`, `check_probe.py`) |
 
 ## Engine traps the design avoids (found in Phase 2)
 

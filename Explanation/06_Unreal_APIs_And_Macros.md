@@ -336,3 +336,96 @@
 | `TArray::StableSort(Predicate)` | components by mesh path | equal keys keep their order (`Containers/Array.h:3704`) |
 | `TConstArrayView<T>`, `FStringView` | hash inputs | non-owning views: no copy; a string view isn't null-terminated |
 | `FMath::RoundToDouble`, `FMath::Fmod` | quantization; the lattice check | |
+
+---
+
+## APIs added in step S3 (the readiness observer and the harness)
+
+| # | API | Where |
+|---|---|---|
+| 24 | `UENUM(BlueprintType)` | `ENavReadyCellState` |
+| 25 | `UActorComponent` lifetime: `BeginPlay` / `EndPlay`, `FindComponentByClass`, `UWorld::GetSubsystem` | `UNavReadyCellComponent` |
+| 26 | Dynamic multicast delegates and `BlueprintAssignable` | `OnCellStateChanged` |
+| 27 | The readiness probe: `IsNavigationBuildingLocked`, `HasDirtyAreasQueued`, `FRecastNavMeshGenerator::HasDirtyTiles(FBox)`, `GrowBoundingBox` | `UNavReadySubsystem` |
+| 28 | The CSV profiler: categories, exclusive timing, custom stats, events, metadata, capture by event | subsystem, director, `run_bench.py` |
+| 29 | Small utilities used in S3 | |
+
+## 24. `UENUM(BlueprintType)`
+
+1. **What it is.** Registers an enum with reflection (`*.generated.h`), so Blueprint, the editor and dynamic delegates can use it.
+2. **Why it exists.** Plain C++ enums are invisible to Blueprint and can't be a `UPROPERTY` or a dynamic delegate parameter.
+3. **How it works.** UHT generates a `UEnum` object and `StaticEnum<T>()`. `BlueprintType` enums must be `uint8`.
+4. **When to use it.** A state shared with Blueprint, the editor or reflected delegates.
+5. **When not to.** Purely internal states (the director's `EPhase` stays a plain `enum class`).
+6. **Common mistakes.** A `BlueprintType` enum that isn't `uint8`; forgetting the header then needs its `.generated.h` include as the last include.
+7. **Example.** `UENUM(BlueprintType) enum class ENavReadyCellState : uint8 { Idle, … };`
+8. **In this project.** The cell's state, broadcast to Blueprint by `OnCellStateChanged`.
+
+## 25. Component lifetime and finding siblings
+
+1. **What it is.** `UActorComponent::BeginPlay` / `EndPlay`, `AActor::FindComponentByClass<T>()` (`Runtime/Engine/Classes/GameFramework/Actor.h:3826`), `UWorld::GetSubsystem<T>()` (`Engine/World.h:4312`).
+2. **Why it exists.** A component starts working once its world plays and must let go before it is destroyed.
+3. **How it works.** `BeginPlay` runs when the owner begins play (after all its components are registered); `EndPlay` on destruction, level unload or world teardown. `FindComponentByClass` returns the first component of that class on the owner. `GetSubsystem` returns the world's instance, or `nullptr` if the subsystem doesn't exist for this world type.
+4. **When to use it.** Binding to sibling components and to world services.
+5. **When not to.** In the constructor: siblings and the world aren't there yet.
+6. **Common mistakes.** Binding in `BeginPlay` and never unbinding (a dangling `AddUObject` is skipped once the object is gone, but stays in the list); assuming a subsystem exists in editor worlds.
+7. **Example.** `PCG = GetOwner()->FindComponentByClass<UPCGComponent>();`
+8. **In this project.** `UNavReadyCellComponent` binds the PCG component's four delegates and registers with `UNavReadySubsystem` in `BeginPlay`, and undoes both in `EndPlay`.
+
+## 26. Dynamic multicast delegates and `BlueprintAssignable`
+
+1. **What it is.** `DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(Type, P1Type, P1Name, P2Type, P2Name)` (`Runtime/Core/Public/Delegates/DelegateCombinations.h:62`): a reflected event; `UPROPERTY(BlueprintAssignable)` lets Blueprint bind to it.
+2. **Why it exists.** Native delegates (`DECLARE_MULTICAST_DELEGATE…`) are faster but invisible to Blueprint.
+3. **How it works.** Bindings are by function name through reflection, so parameters must be reflected types, and the names in the macro become the Blueprint pin names.
+4. **When to use it.** Events a designer or Blueprint should react to.
+5. **When not to.** Hot paths and C++-only listeners: `UNavReadySubsystem::OnAnyCellStateChanged` is native.
+6. **Common mistakes.** A non-reflected parameter type; broadcasting while iterating a container the listener can change.
+7. **Example.** `Component->OnCellStateChanged.Broadcast(Component, NewState);`
+8. **In this project.** One per cell (Blueprint), one native for all cells (the director, the baselines in S4).
+
+## 27. The readiness probe
+
+1. **What it is.** `UNavigationSystemV1::IsNavigationBuildingLocked(Flags = ~0)` (inline, `NavigationSystem.h:1083`), `HasDirtyAreasQueued()` (`NavigationSystem.cpp:3561–3564`), and on the Recast generator `HasDirtyTiles(const FBox&)` and `GrowBoundingBox(const FBox&, bool)` (exported, `NavMesh/RecastNavMeshGenerator.h:830, 836`).
+2. **Why it exists.** Navigation's own view of what is still being built, globally and per area.
+3. **How it works.** `HasDirtyTiles(Box)` converts the box to a tile range (`FRcTileBox`: a max edge exactly on a tile boundary counts the lower tile, `.h:240–257`) and looks for pending or running tile builds in it (`RecastNavMeshGenerator.cpp:6644–6670`). `GrowBoundingBox` adds the navmesh's border (`:6596–6601`): a change near a tile edge also dirties the next tile, because the engine grows every dirty area the same way first (`GrowDirtyBounds`, `:6603–6608`, used at `:6787`).
+4. **When to use it.** Deciding when one region's navigation is current.
+5. **When not to.** With a non-Recast navigation data: cast to `ARecastNavMesh` first; only then is the generator a `FRecastNavMeshGenerator`.
+6. **Common mistakes.** Caching the generator (a full rebuild can recreate it); checking the content's own bounds instead of the grown ones; treating the global checks as per-region.
+7. **Example.** `const FBox Grown = Generator->GrowBoundingBox(Content, false); const FVector G = FVector::Max(Content.Min - Grown.Min, Grown.Max - Content.Max); Generator->HasDirtyTiles(FBox(Content.Min - G, Content.Max + G));` (the larger growth on both sides, because the engine's dirty-area growth swaps low and high)
+8. **In this project.** `UNavReadySubsystem::Tick`, every frame, for every committed or ready cell.
+
+## 28. The CSV profiler
+
+1. **What it is.** Unreal's per-frame CSV capture (`Runtime/Core/Public/ProfilingDebugging/CsvProfiler.h`): `CSV_DEFINE_CATEGORY(Name, bOnByDefault)` (`:50`), `CSV_SCOPED_TIMING_STAT_EXCLUSIVE(Name)` (`:129`), `CSV_CUSTOM_STAT(Category, Name, Value, Op)` (`:155`), `CSV_EVENT(Category, Format, …)` (`:56`), `CSV_METADATA(Key, Value)` (`:85`).
+2. **Why it exists.** Frame-by-frame numbers for whole runs, with little overhead, in packaged Development builds.
+3. **How it works.** One row per frame. An exclusive timing stat becomes `Exclusive/GameThread/<Name>` and is subtracted from any enclosing exclusive stat; the engine's own include `NavigationBuild` (`Engine/Private/LevelTick.cpp:1645`) and `Tickables` (`Engine/Private/Tickable.cpp:173`). Custom stats become `<Category>/<Name>` columns; navigation records `NavTasks/NumRemainingTasks_<navigation data>` every navigation tick (`NavigationSystem.cpp:1796–1806`). Events land in the `EVENTS` column of their frame. `-csvStartOnEvent=` / `-csvStopOnEvent=` start and stop the capture on an event whose **text** matches, case-insensitively, without its category (`Core/Private/ProfilingDebugging/CsvProfiler.cpp:4759, 4769, 5080–5090`); the start event itself is not in the capture. Metadata goes into the capture's last row.
+4. **When to use it.** Benchmarks: frame-time distributions, cost splits, timelines.
+5. **When not to.** Shipping builds (compiled out); deep call trees (use Unreal Insights).
+6. **Common mistakes.** Expecting the start event in the capture; a category defined twice; reading a capture that wasn't finalised (no end header and metadata row: the run crashed).
+7. **Example.** `CSV_CUSTOM_STAT(NavReady, CellsReady, Count, ECsvCustomStatOp::Set);`
+8. **In this project.** Category `NavReady` (cost, counts, `CellCommitted_<i>` / `CellReady_<i>` events) and `NRBench` (`BenchStart`, `BenchEnd`); `run_bench.py` passes `-csvStartOnEvent=BenchStart -csvStopOnEvent=BenchEnd`.
+
+## 29. Small utilities used in S3
+
+| API | Use here | Note |
+|---|---|---|
+| `GFrameCounter` | commit and probe frames | `uint64`, the engine's frame number (`Core/Public/CoreGlobals.h:532`) |
+| `AActor::GetComponentsBoundingBox(bNonColliding = true)` | a cell's content bounds | `GameFramework/Actor.h:3585`; `true` includes the non-colliding cell box |
+| `TWeakObjectPtr<T>` | queued broadcasts | `Get()` returns `nullptr` once the object is gone |
+| `TArray::RemoveAtSwap` | unregistering a cell | O(1): the last element fills the gap, so order isn't kept |
+| `TArray::IndexOfByKey` | finding a cell | linear: fine for tens of cells (`12`) |
+
+---
+
+## APIs added in the final step
+
+## 30. `SetCanEverAffectNavigation` on a live ISM, and `AddDirtyArea`
+
+1. **What it is.** `UActorComponent::SetCanEverAffectNavigation(bool)` (`Engine/Private/Components/ActorComponent.cpp:3266–3274`) and `UNavigationSystemV1::AddDirtyArea(const FBox&, ENavigationDirtyFlag, FName)` (`NavigationSystem/Public/NavigationSystem.h:973`; flags in `Engine/Classes/AI/Navigation/NavigationDirtyArea.h:12–21`).
+2. **Why it exists.** To make a component navigation-relevant after it was created, and to tell navigation an area changed.
+3. **How it works.** Switching the flag on a registered component registers it with the navigation octree (`ActorComponent.cpp:3276–3288`). But an instanced static mesh opts out of the dirty area on that registration, because it pushes per-instance updates instead (`InstancedStaticMesh.cpp:5513–5519`, `NavigationDataHandler.cpp:50`); so an ISM whose instances already exist is registered without its tiles being rebuilt. `AddDirtyArea` marks the area explicitly.
+4. **When to use it.** Handing content that already exists to navigation in one step: NavReady's commit.
+5. **When not to.** Per instance: adding instances to a navigation-relevant ISM already dirties their areas.
+6. **Common mistakes.** Assuming the flag switch alone rebuilds the navmesh (it didn't, in this project's final batch: `09`).
+7. **Example.** `ISM->SetCanEverAffectNavigation(true); NavSys->AddDirtyArea(ISM->Bounds.GetBox(), ENavigationDirtyFlag::All, TEXT("NavReadyCommit"));`
+8. **In this project.** `UNavReadySubsystem::Tick`, the commit.

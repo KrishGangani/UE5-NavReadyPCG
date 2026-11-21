@@ -23,15 +23,20 @@
 #include "NavigationData.h"
 #include "NavigationSystem.h"
 #include "NavigationSystemTypes.h"
+#include "NavReadyCellComponent.h"
 #include "NRCellActor.h"
 #include "NRGraphFactory.h"
 #include "PCGComponent.h"
 #include "PCGWorldActor.h"
+#include "ProfilingDebugging/CsvProfiler.h"
 #include "Stats/Stats.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(NRBenchmarkSubsystem)
 
 DEFINE_LOG_CATEGORY_STATIC(LogNRBench, Log, All);
+
+// BenchStart / BenchEnd open and close the CSV capture (-csvStartOnEvent / -csvStopOnEvent match the event text).
+CSV_DEFINE_CATEGORY(NRBench, true);
 
 namespace NRBench
 {
@@ -143,10 +148,19 @@ void UNRBenchmarkSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	FParse::Value(CommandLine, TEXT("NRSeed="), BaseSeed);
 	FParse::Value(CommandLine, TEXT("NRRunTag="), RunTag);
 	FParse::Value(CommandLine, TEXT("NRTimeout="), TimeoutSeconds);
+	FParse::Value(CommandLine, TEXT("NRConfig="), Config);
+	FParse::Value(CommandLine, TEXT("NRCells="), CellCount);
+	CellCount = FMath::Clamp(CellCount, 1, NRBench::GridSide * NRBench::GridSide);
 	BaseSeed = FMath::Clamp(BaseSeed, 0, NRBench::MaxBaseSeed);
 	RunTag = FPaths::MakeValidFileName(RunTag, TEXT('_')); // the tag names the report file: no folders, no '..'
 
 	BeginPlayTime = InWorld.GetTimeSeconds();
+	if (Config != TEXT("B0") && Config != TEXT("NR"))
+	{
+		UE_LOG(LogNRBench, Error, TEXT("NRRun: unknown configuration '%s' (B0 or NR)."), *Config);
+		FinishRun(TEXT("unknown configuration"), /*bCompleted=*/false);
+		return;
+	}
 	if (!BuildArena(InWorld) || !SpawnCells(InWorld))
 	{
 		FinishRun(TEXT("set-up failed"), /*bCompleted=*/false);
@@ -156,7 +170,7 @@ void UNRBenchmarkSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	Camera = InWorld.SpawnActor<ACameraActor>();
 	UpdateCamera(0.0);
 	Phase = EPhase::WaitingForNavmesh;
-	UE_LOG(LogNRBench, Display, TEXT("NRRun '%s': %d cells, base seed %d; waiting for the navmesh."), *RunTag, Cells.Num(), BaseSeed);
+	UE_LOG(LogNRBench, Display, TEXT("NRRun '%s' (%s): %d cells, base seed %d; waiting for the navmesh."), *RunTag, *Config, Cells.Num(), BaseSeed);
 }
 
 bool UNRBenchmarkSubsystem::BuildArena(UWorld& World)
@@ -226,7 +240,9 @@ bool UNRBenchmarkSubsystem::SpawnCells(UWorld& World)
 	{
 		GraphParams.Meshes.Add(TSoftObjectPtr<UStaticMesh>(Mesh));
 	}
-	GraphParams.bNavigationVisible = true; // Every configuration up to S4 is a baseline: props reach navigation directly.
+	// B0: props reach navigation the moment PCG spawns them. NR: spawned navigation-invisible; NavReady commits each
+	// generated cell as a whole (02 section 9). The flag is not part of the content hash.
+	GraphParams.bNavigationVisible = Config != TEXT("NR");
 	Graph = NRGraphFactory::BuildRockFieldGraph(this, GraphParams);
 	if (!Graph)
 	{
@@ -255,7 +271,7 @@ bool UNRBenchmarkSubsystem::SpawnCells(UWorld& World)
 	const double GridOffset = 0.5 * (NRBench::GridSide - 1);
 	for (int32 Row = 0; Row < NRBench::GridSide; ++Row)
 	{
-		for (int32 Column = 0; Column < NRBench::GridSide; ++Column)
+		for (int32 Column = 0; Column < NRBench::GridSide && Records.Num() < CellCount; ++Column)
 		{
 			const int32 Index = Records.Num();
 			const FVector Location = NRBench::ArenaCenter
@@ -402,6 +418,11 @@ void UNRBenchmarkSubsystem::HandleCellGenerated(UPCGComponent* Component, int32 
 	Record.Hash = NavReadyContentHash::HashComponents(Generated);
 }
 
+int32 UNRBenchmarkSubsystem::CellsReady() const
+{
+	return Algo::CountIf(Cells, [](const ANRCellActor* Cell) { return IsValid(Cell) && Cell->GetNavReady()->IsAIReady(); });
+}
+
 int32 UNRBenchmarkSubsystem::CellsGenerated() const
 {
 	return Algo::CountIf(Records, [](const FCellRecord& Record) { return Record.GenerationDone >= 0.0; });
@@ -409,8 +430,27 @@ int32 UNRBenchmarkSubsystem::CellsGenerated() const
 
 void UNRBenchmarkSubsystem::FinishRun(const TCHAR* Reason, bool bCompleted)
 {
+	const bool bFlew = FlightStartWallTime > 0.0;
+	if (bFlew)
+	{
+		CSV_EVENT(NRBench, TEXT("BenchEnd")); // closes the capture before the reporting below
+	}
 	Phase = EPhase::Done;
 	FramesSinceDone = 0;
+
+	// NavReady's observations, relative to the flight's start like the generation times.
+	for (int32 Index = 0; Index < Records.Num(); ++Index)
+	{
+		const FNavReadyCell* Observed = IsValid(Cells[Index]) ? Cells[Index]->GetNavReady()->GetCell() : nullptr;
+		if (Observed && bFlew)
+		{
+			FCellRecord& Record = Records[Index];
+			Record.CommitTime = Observed->CommitTime >= 0.0 ? Observed->CommitTime - FlightStartWallTime : -1.0;
+			Record.ReadyTime = Observed->ReadyTime >= 0.0 ? Observed->ReadyTime - FlightStartWallTime : -1.0;
+			Record.DirtiedWhileReady = Observed->TimesDirtiedWhileReady;
+			Record.bHashMatchesAtReady = Observed->Hash == Record.Hash;
+		}
+	}
 
 	int32 Instances = 0;
 	int32 PocketPoints = 0;
@@ -421,9 +461,9 @@ void UNRBenchmarkSubsystem::FinishRun(const TCHAR* Reason, bool bCompleted)
 		Instances += Record.Hash.NumInstances;
 		PocketPoints += Record.PocketPoints;
 		RunHash = FCrc::TypeCrc32(Record.Hash.ContentHash, RunHash); // chained in cell order: one value to compare runs by
-		UE_LOG(LogNRBench, Display, TEXT("NRRun cell %2d (%d,%d) seed %d: %3d instances, content 0x%08X, ordered 0x%08X, generation %.3f -> %.3f s, pockets %d of %d navmesh points"),
+		UE_LOG(LogNRBench, Display, TEXT("NRRun cell %2d (%d,%d) seed %d: %3d instances, content 0x%08X, ordered 0x%08X, generation %.3f -> %.3f s, ready %.3f s, pockets %d of %d navmesh points"),
 			Index, Record.Grid.X, Record.Grid.Y, Record.Seed, Record.Hash.NumInstances, Record.Hash.ContentHash,
-			Record.Hash.OrderedHash, Record.GenerationStart, Record.GenerationDone, Record.PocketPoints, Record.NavPoints);
+			Record.Hash.OrderedHash, Record.GenerationStart, Record.GenerationDone, Record.ReadyTime, Record.PocketPoints, Record.NavPoints);
 	}
 
 	// Every cell generated, has props, and at least one sample point in it is blocked: the props reached navigation.
@@ -432,11 +472,15 @@ void UNRBenchmarkSubsystem::FinishRun(const TCHAR* Reason, bool bCompleted)
 	const int32 SamplesPerCell = NRBench::PocketSamplesPerSide * NRBench::PocketSamplesPerSide;
 	const int32 CellsWithBlockedPoints = Algo::CountIf(Records, [SamplesPerCell](const FCellRecord& Record)
 		{ return Record.Hash.NumInstances > 0 && Record.NavPoints < SamplesPerCell; });
+	const int32 Ready = Algo::CountIf(Records, [](const FCellRecord& Record) { return Record.ReadyTime >= 0.0; });
 	bRunPassed = bCompleted && !bGeneratedOutsideFlight && Records.Num() > 0 && Generated == Records.Num()
-		&& CellsWithBlockedPoints == Records.Num();
+		&& CellsWithBlockedPoints == Records.Num() && Ready == Records.Num();
 	UE_LOG(LogNRBench, Display, TEXT("NRRun '%s' result (%s): %d/%d cells generated, %d instances, %d pocket points, run content hash 0x%08X."),
 		*RunTag, Reason, Generated, Records.Num(), Instances, PocketPoints, RunHash);
-	UE_LOG(LogNRBench, Display, TEXT("NRRun: %d/%d cells have props that block navigation."), CellsWithBlockedPoints, Records.Num());
+	// NavReady hashes each cell when it settles; it must be the content the director hashed at generation.
+	const int32 HashMatches = Algo::CountIf(Records, [](const FCellRecord& Record) { return Record.bHashMatchesAtReady; });
+	UE_LOG(LogNRBench, Display, TEXT("NRRun: %d/%d cells have props that block navigation; %d/%d reached navigation-ready; NavReady's hash at ready matches the generated content in %d/%d cells."),
+		CellsWithBlockedPoints, Records.Num(), Ready, Records.Num(), HashMatches, Records.Num());
 	if (!bRunPassed)
 	{
 		UE_LOG(LogNRBench, Error, TEXT("NRRun: FAILED."));
@@ -446,15 +490,16 @@ void UNRBenchmarkSubsystem::FinishRun(const TCHAR* Reason, bool bCompleted)
 
 void UNRBenchmarkSubsystem::WriteRunReport() const
 {
-	FString Report = FString::Printf(TEXT("# run=%s base_seed=%d cells=%d generation_radius_cm=%.0f\n"),
-		*RunTag, BaseSeed, Records.Num(), NRBench::GenerationRadius);
-	Report += TEXT("cell,grid_x,grid_y,seed,instances,content_hash,ordered_hash,generation_start_s,generation_done_s,nav_points,pocket_points\n");
+	FString Report = FString::Printf(TEXT("# run=%s config=%s base_seed=%d cells=%d generation_radius_cm=%.0f\n"),
+		*RunTag, *Config, BaseSeed, Records.Num(), NRBench::GenerationRadius);
+	Report += TEXT("cell,grid_x,grid_y,seed,instances,content_hash,ordered_hash,generation_start_s,generation_done_s,committed_s,ready_s,dirtied_while_ready,nav_points,pocket_points\n");
 	for (int32 Index = 0; Index < Records.Num(); ++Index)
 	{
 		const FCellRecord& Record = Records[Index];
-		Report += FString::Printf(TEXT("%d,%d,%d,%d,%d,0x%08X,0x%08X,%.6f,%.6f,%d,%d\n"), Index, Record.Grid.X, Record.Grid.Y,
+		Report += FString::Printf(TEXT("%d,%d,%d,%d,%d,0x%08X,0x%08X,%.6f,%.6f,%.6f,%.6f,%d,%d,%d\n"), Index, Record.Grid.X, Record.Grid.Y,
 			Record.Seed, Record.Hash.NumInstances, Record.Hash.ContentHash, Record.Hash.OrderedHash,
-			Record.GenerationStart, Record.GenerationDone, Record.NavPoints, Record.PocketPoints);
+			Record.GenerationStart, Record.GenerationDone, Record.CommitTime, Record.ReadyTime, Record.DirtiedWhileReady,
+			Record.NavPoints, Record.PocketPoints);
 	}
 
 	const FString Path = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("NRRuns"), RunTag + TEXT(".csv"));
@@ -477,7 +522,10 @@ void UNRBenchmarkSubsystem::Tick(float DeltaTime)
 	switch (Phase)
 	{
 	case EPhase::WaitingForNavmesh:
-		if (IsArenaNavigable())
+		// Navigable, and then idle for RequiredIdleFrames frames: the arena's first build is finished before any cell
+		// starts, so no cell's time-to-navigable includes it.
+		IdleFrames = IsNavigationIdle() ? IdleFrames + 1 : 0;
+		if (IsArenaNavigable() && IdleFrames >= NRBench::RequiredIdleFrames)
 		{
 			if (!AreTilesAlignedWithCells())
 			{
@@ -487,6 +535,10 @@ void UNRBenchmarkSubsystem::Tick(float DeltaTime)
 			Phase = EPhase::Flying;
 			FlightStartWorldTime = World->GetTimeSeconds();
 			FlightStartWallTime = FPlatformTime::Seconds();
+			CSV_METADATA(TEXT("NRRunTag"), *RunTag);
+			CSV_METADATA(TEXT("NRConfig"), *Config);
+			CSV_METADATA(TEXT("NRSeed"), *FString::FromInt(BaseSeed));
+			CSV_EVENT(NRBench, TEXT("BenchStart"));
 			UE_LOG(LogNRBench, Display, TEXT("NRRun: navmesh ready after %.2f s (%.0f cm tiles, aligned with the cells); the camera starts its path."),
 				Elapsed, NRBench::NavTileSize);
 		}
@@ -515,7 +567,8 @@ void UNRBenchmarkSubsystem::Tick(float DeltaTime)
 		// "idle"; the pocket check needs the settled navmesh.
 		UpdateCamera(World->GetTimeSeconds() - FlightStartWorldTime);
 		IdleFrames = IsNavigationIdle() ? IdleFrames + 1 : 0;
-		if (World->GetTimeSeconds() - SettleStartWorldTime >= NRBench::SettleSeconds && IdleFrames >= NRBench::RequiredIdleFrames)
+		if (World->GetTimeSeconds() - SettleStartWorldTime >= NRBench::SettleSeconds && IdleFrames >= NRBench::RequiredIdleFrames
+			&& CellsReady() == Records.Num())
 		{
 			const double CheckStart = FPlatformTime::Seconds();
 			CheckPockets();

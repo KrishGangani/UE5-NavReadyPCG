@@ -7,6 +7,7 @@
 
 class UBoxComponent;
 class UInstancedStaticMeshComponent;
+class UNavReadyCellComponent;
 class UPCGComponent;
 class UPCGGraph;
 
@@ -34,6 +35,9 @@ public:
 
 	UPCGComponent* GetPCG() const { return PCG; }
 
+	/** NavReady's view of this cell: its state and the moments it changed (S3: observed only). */
+	UNavReadyCellComponent* GetNavReady() const { return NavReady; }
+
 	/** The cell's volume in world space (the box, not the generated props). */
 	FBox GetCellBounds() const;
 
@@ -47,4 +51,7 @@ private:
 
 	UPROPERTY(VisibleAnywhere, Category = "Cell")
 	TObjectPtr<UPCGComponent> PCG;
+
+	UPROPERTY(VisibleAnywhere, Category = "Cell")
+	TObjectPtr<UNavReadyCellComponent> NavReady;
 };

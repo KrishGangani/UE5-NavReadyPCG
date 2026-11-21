@@ -93,7 +93,8 @@ D:\UNREAL PORTFOLIO\P08_NavReadyPCG\Tools\                    ← build/package/
 NavSys    = UNavigationSystemV1 of the world            (none → not ready)
 NavData   = NavSys->GetDefaultNavDataInstance(DontCreate) (none, or not an ARecastNavMesh → not ready)
 Generator = NavData->GetGenerator(), cast to FRecastNavMeshGenerator only after the ARecastNavMesh check (none → not ready)
-Probe     = { NavSys->IsNavigationBuildingLocked(), NavSys->HasDirtyAreasQueued(), Generator->HasDirtyTiles(CellBounds) }
+Bounds    = Generator->GrowBoundingBox(content bounds of the cell's owner)   (taken at commit; S3)
+Probe     = { NavSys->IsNavigationBuildingLocked(), NavSys->HasDirtyAreasQueued(), Generator->HasDirtyTiles(Bounds) }
 Settled  ⇔ FramesSinceCommit ≥ 1 ∧ ¬Locked ∧ ¬DirtyAreasQueued ∧ ¬CellHasDirtyTiles
 ```
 The generator is fetched every frame, never cached: a full rebuild can recreate it (`NavigationData.cpp:626`).
@@ -184,9 +185,9 @@ Notes:
 |---|---|---|
 | `nr.CommitsPerFrame` | 1 | One commit = one cell's components entering the navigation octree (geometry export is `Instant` by default, `01b` §3) plus its dirty areas, in the next navigation tick. At 60 fps that allows 60 cells per second, far above the rate at which cells finish generating. Swept 1 / 2 / 4 / 16 in Phase 8 |
 | Commit order | FIFO (generation-complete order) | Simple and fair; PCG's scheduler already generates nearest-first. Priority by distance to the player is a growth path (§11) |
-| Readiness rule | §4.1 | Follows directly from `01b #6–#7`. No timers, no guessed delays |
+| Readiness rule | §4.1 | Follows directly from `01b #6–#7`. No timers, no guessed delays. The area checked is the cell's content grown by the navmesh border (S3), because the engine grows every dirty area the same way before marking tiles |
 | Hash quantization | location 1 mm, rotation quaternion components 1e-4, scale 1e-3 | Coarse enough to ignore float noise between the editor and packaged builds (instance data is stored as floats relative to the component), fine enough that any real content change alters the hash. The order-dependent hash is reported alongside, to show whether instance *order* is stable (H6) |
-| Agents | 8 per cell; a request every 0.5 s of game time; 3 m/s; measured for their first 6 s of activity | 1,536 measured requests per run (> 1,000, SC1). Game time, so every configuration issues identical request timing in fixed-step runs |
+| Agents | 8 per cell; a request every 0.5 s of game time; 3 m/s; measured for their first 6 s of activity | 1,536 measured requests per run (> 1,000, SC1). Game time, which follows the wall clock in the real-time, 60 fps-capped benchmark runs (S3, `01` §7) |
 | Generation source | the player camera (PCG's default: player controllers are generation sources, `01b` §2) | No extra generation-source component needed |
 | Navmesh | `Dynamic`, every other setting at its engine default | `Static` never rebuilds; `DynamicModifiersOnly` can't add navmesh for new geometry (`01b` §3). Defaults keep the result about the engine as shipped |
 
@@ -279,4 +280,9 @@ Notes:
 | A pocket check on the settled navmesh ends every run (S2) | It turns `01` §6.1's "no enclosed pockets" into a measured zero, so path failures in S4 can't come from the layout (`05` C4) |
 | Jitter ±25 cm and scale 0.9–1.4 instead of 0.6–1.4 (S2 code review, then S2's first run) | The engine shapes' pivot is their centre and the points lie on the floor, so a prop stands 50 cm × scale above it: at 0.6 that is 30 cm, under the agent's 35 cm step height (`BaseEngine.ini:3056`), so small props didn't block. With ±50 cm of jitter the first S2 run found one enclosed sample point (cell 15, seed 1, deterministic in all four seed-1 runs: `09` S2); ±25 cm keeps every gap ≥ about 1.5 m, above the ≈ 1.15 m at which a gap closes in the navmesh (`01` §6.1, `05` C3) |
 | Cell seed = base seed × 100 + index (S2) | With `+ index`, base seed 2's cell 0 would get base seed 1's cell 1 seed, and the seed check would compare shifted copies |
+| **Scope cut (owner, 2026-11-21):** no measuring agents, no B1–B3, no debug view, no commit sweep; NR is compared with B0 only, on M1, frame time and NavReady's cost | The project was closed early; M2, M4, M4b and SC1/SC4 are reported as not measured (`09`) |
+| The commit also calls `AddDirtyArea` on each committed component (final step) | Registering an ISM that already has instances doesn't dirty its area (`06` §30); the first NR runs showed it |
+| Benchmarks run in real time capped at 60 fps, not with a fixed step (S3) | A fixed step (`-deterministic -FPS=60`) never waits: each frame advances game time by 1/60 s however long it took (`UnrealEngine.cpp:3005–3017`), so game time runs ahead of the wall clock by a factor that depends on each configuration's frame cost, while tile builds run in real time on worker threads. The configurations would then no longer face the same workload in real time. With the cap, game time follows the wall clock while frames stay under 16.7 ms, and the capture shows every frame that doesn't (S3; S2 saw the same effect without the GPU, `09` S2) |
+| The readiness area is the cell's content bounds grown by the navmesh border, not the cell box (S3) | A prop near a cell edge dirties the neighbour's tile too (`GrowDirtyBounds`); checking only the box could report a cell ready while one of its own changes is still building (`05` D3) |
+| `FNavReadyCell` also counts "dirtied while ready" episodes (S3) | A later cell's edge props can re-dirty a ready neighbour's tile. S3 measures how often, so S5 can choose with data between pausing that cell's agents and keeping props away from cell edges |
 | The hash API is `HashInstance` + `Combine` + `HashComponents` instead of `Quantize` + `HashCell` over instance keys (S2) | Hashing each instance as it is read needs no intermediate key struct; `HashComponents` reads a cell's ISMs, so the director (S2) and the pipeline (S5) share one function, while `HashInstance` and `Combine` stay pure for the unit tests (`05` C1) |

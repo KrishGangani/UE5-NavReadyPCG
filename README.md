@@ -4,11 +4,11 @@
 
 **Domain:** Procedural & runtime generation · navigation · **Difficulty:** ★★★★½ · **Engine:** UE 5.8.4
 
-> **Status: in progress. There are no results yet.** Phases 1–4 are done: the problem analysis, the research in the 5.8.4 engine source, the final architecture, and a project skeleton that builds, packages and runs with 0 errors and 0 warnings. Phase 5 has started: step S1 showed, in a packaged build, that the arena, its navmesh and PCG's runtime generation all work in a world built entirely at runtime; step S2 added the 16-cell workload and a per-cell content hash, which is identical run to run, with and without the GPU, cooked and uncooked. The ten portfolio projects are developed in parallel, and every Unreal Engine build and benchmark runs one at a time through a machine-wide queue, so measurements stay clean. The success criteria below are **targets fixed before any pipeline code exists, not results**. Sections marked *(pending)* are filled in only from real measurements, in the phase named.
+> **Status: closed early (2026-11-21), by the owner's decision.** Phases 1–4 are done (problem analysis, research in the 5.8.4 engine source, architecture, a skeleton that builds and packages with 0 errors and 0 warnings). Phase 5 delivered the runtime world (S1), the 16-cell workload with a per-cell content hash (S2), the readiness observer and the benchmark harness (S3), and NavReady's commit in its smallest form (configuration `NR`). **What is measured:** determinism (16/16 cells, every run, every build), time to navigable for the uncoordinated default B0, and NavReady's own cost. **What is not:** the AI path checks (no measuring agents) and the B1–B3 baselines were cut, and NR's first runs exposed an engine behaviour (an ISM that already has its instances doesn't dirty the navmesh when made navigation-relevant); the fix is written but **not yet verified by a run**. Details: [09](Explanation/09_Testing_And_Benchmarks.md).
 
 | Phase | 1 Problem | 2 Research | 3 Architecture | 4 Foundation | 5 Implementation | 6 Explanation | 7 Testing | 8 Profiling | 9 Review | 10 Portfolio |
 |---|---|---|---|---|---|---|---|---|---|---|
-| State | ✓ | ✓ | ✓ final | ✓ | in progress (S2 of 7 ✓) | ongoing | — | — | — | — |
+| State | ✓ | ✓ | ✓ final | ✓ | closed early: S1–S3 ✓, S5 minimal (fix unverified), S4/S6/S7 cut | ✓ for the final code | partial | one short batch | — | partial (no video) |
 
 ---
 
@@ -56,11 +56,21 @@ The full table, with exact thresholds, is in [01_Problem_Analysis.md §6.4](Expl
 
 ## Before / after comparison
 
-*(pending, Phase 8)*. Five configurations on one fixed workload: B0, B1, B2, B3 and NR.
+Planned: five configurations (B0, B1, B2, B3, NR). Run: **B0 vs NR only**, one short batch, and the NR runs are not valid (their props never reached the navmesh; `09`). So there is **no before/after claim** for readiness, path correctness or frame time.
 
 ## Benchmark results
 
-*(pending, Phase 8)*. Raw data in [Benchmarks/](Benchmarks/README.md).
+Batch `2026-11-21_111841_final`: packaged Development build, real time capped at 60 fps, RTX 5070 Laptop, 1280×720, pinned to the P-cores (mask 0xFFFF), 2 runs per configuration + priming. Raw data and summary in [Benchmarks/](Benchmarks/README.md).
+
+| Measured | Result |
+|---|---|
+| **Determinism (SC2)** | ✅ Same seed → the same content hash in **16/16 cells**, run to run, with and without the GPU, cooked and uncooked, and in B0 and NR; another seed changes 16/16 |
+| **B0 time to navigable per cell (M1)** | median **20.1 ms** [19.7–20.5], p95 **28.5 ms** [25.9–31.2] (generation start → the cell's tiles rebuilt, wall clock) |
+| **NavReady's own cost (SC6)** | median **0.003 ms**, max **0.19–0.33 ms** per frame in all four runs (target: median ≤ 0.05, max ≤ 0.50) ✅ |
+| B0: ready cells re-dirtied by a neighbour's edge props | 32–35 episodes per run: why per-cell readiness must watch neighbours (`12`) |
+| AI path failures (SC1), time to AI-active (SC4), worst frame (SC5), NR's readiness (SC3) | **not measured** |
+
+![B0: generation start to navigation-ready, per cell](Media/b0_time_to_navigable.svg)
 
 ## Existing work it is compared against
 
@@ -89,9 +99,9 @@ The UE project is in [NavReadyPCG/](NavReadyPCG/) (UE 5.8.4, C++):
 | [01b_Research_Findings](Explanation/01b_Research_Findings.md) | Phase 2: verified engine behaviour (UE 5.8.4), the README claims checked, PCG feature maturity, and what it changed in the design |
 | [02_System_Architecture](Explanation/02_System_Architecture.md) | Final v1.0: modules, classes, the cell pipeline, per-frame flow, safety rules, rejected alternatives |
 | [03_Implementation_Roadmap](Explanation/03_Implementation_Roadmap.md) | The small, ordered build steps; baselines captured before the pipeline exists |
-| [04](Explanation/04_CPP_Fundamentals.md) · [05](Explanation/05_Line_By_Line_Code_Explanation.md) · [06](Explanation/06_Unreal_APIs_And_Macros.md) · [07](Explanation/07_Common_Mistakes.md) | C++ fundamentals, line-by-line code, APIs and macros, common mistakes. Written step by step with the code (current to step S2) |
+| [04](Explanation/04_CPP_Fundamentals.md) · [05](Explanation/05_Line_By_Line_Code_Explanation.md) · [06](Explanation/06_Unreal_APIs_And_Macros.md) · [07](Explanation/07_Common_Mistakes.md) | C++ fundamentals, line-by-line code, APIs and macros, common mistakes. Written step by step with the code (current to the final code) |
 | [09](Explanation/09_Testing_And_Benchmarks.md) | Every check and benchmark batch so far |
-| [08](Explanation/08_Debugging_And_Profiling.md) · [10](Explanation/10_Interview_Questions.md) · [11](Explanation/11_Optimization_Decisions.md) · [12](Explanation/12_Future_Scalability.md) | Debugging and profiling, interview questions, optimisation decisions, future scalability. Filled in during Phases 7–10 |
+| [08](Explanation/08_Debugging_And_Profiling.md) · [10](Explanation/10_Interview_Questions.md) · [11](Explanation/11_Optimization_Decisions.md) · [12](Explanation/12_Future_Scalability.md) | Debugging and profiling, interview questions, optimisation decisions, future scalability. 08 and 11 not written; 10 and 12 written |
 | [Phase2_Raw_Notes/](Explanation/Phase2_Raw_Notes/README.md) | The audit trail behind 01b |
 | [Research/](Explanation/Research/) | The portfolio-wide research this project draws on: job market, technical challenges, existing solutions, local engine verification |
 

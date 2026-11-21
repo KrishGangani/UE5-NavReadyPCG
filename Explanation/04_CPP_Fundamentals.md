@@ -2,7 +2,7 @@
 
 **Rule:** only the language ideas this project's files actually rely on, each with a tiny example first and then where it appears in our code. This file grows with every implementation step.
 
-**State (S2):** sections 1–6 cover the Phase 4 files (module entry points, C# build rules, descriptors, INI). Sections 7–15 were written for the S1 world spike; their examples now point at the S2 code, with the S1-only code noted. Sections 16–22 cover what S2 adds.
+**State (S3):** sections 1–6 cover the Phase 4 files (module entry points, C# build rules, descriptors, INI). Sections 7–15 were written for the S1 world spike; their examples now point at the S2 code, with the S1-only code noted. Sections 16–22 cover what S2 adds, 23–27 what S3 adds.
 
 ---
 
@@ -236,3 +236,55 @@ class UNRBenchmarkSubsystem
 - `= value` on a member gives it that value in every new object, so no constructor is needed.
 - A struct declared **inside** a class is a nested type: private to the class if declared in a `private:` section.
 - **In our code:** `FCellRecord` (-1 marks "not happened yet") and `FRockFieldParams`.
+
+## Added in step S3
+
+## 23. Parallel arrays, and removing with a swap
+
+```cpp
+TArray<FNavReadyCell> Cells;                              // Cells[i] belongs to Components[i]
+TArray<TObjectPtr<UNavReadyCellComponent>> Components;
+Cells.RemoveAtSwap(Index); Components.RemoveAtSwap(Index); // the last element moves into the gap, in both
+```
+- Two arrays with the same index instead of one array of structs: the per-frame loop touches only the plain data in `Cells`; the UObject pointers sit in a `UPROPERTY` array so the garbage collector sees them.
+- `RemoveAtSwap` is O(1) because it doesn't shift the rest, but it changes the order. Both arrays must always be changed together.
+- **In our code:** `UNavReadySubsystem`'s registry.
+
+## 24. Never change a container while something iterates it
+
+```cpp
+bBroadcasting = true;
+for (int32 i = 0; i < Pending.Num(); ++i) { const auto Change = Pending[i]; Change.Key->Event.Broadcast(…); }
+bBroadcasting = false;
+```
+- A listener can do anything: destroy a cell (which unregisters it) or cause a new state change (which appends to `Pending`). So the loop goes **by index** (it sees appended items), **copies** the element before calling out (the array may reallocate), and removals during the loop only **empty the slot**; `Compact()` removes empty slots afterwards.
+- **In our code:** `FlushBroadcasts`, `UnregisterCell`, `Compact`.
+
+## 25. Detecting a rising edge
+
+```cpp
+const bool bWasDirty = bDirty;
+bDirty = /* this frame's value */;
+if (bDirty && !bWasDirty) { ++Episodes; }   // counted once per episode, not once per frame
+```
+- **In our code:** `FNavReadyCell::ObserveWhileReady`.
+
+## 26. `static_cast` down a class hierarchy, and `static_assert`
+
+```cpp
+const ARecastNavMesh* NavMesh = Cast<ARecastNavMesh>(NavData);                          // checked: nullptr if not
+const auto* Generator = static_cast<const FRecastNavMeshGenerator*>(NavMesh->GetGenerator()); // unchecked
+static_assert(WITH_RECAST, "NavReadyPCGCore needs Recast navigation.");                 // checked at compile time
+```
+- `Cast<T>` (Unreal) checks the UObject's class at run time. A generator isn't a UObject, so the downcast is a plain `static_cast`, which checks nothing: it is correct only because the navigation data was first checked to be a Recast navmesh, whose generator is always a Recast generator.
+- `static_assert(condition, message)` stops the **build** if the condition is false.
+- **In our code:** the probe in `UNavReadySubsystem::Tick`.
+
+## 27. `TPair` and `TWeakObjectPtr`
+
+```cpp
+TArray<TPair<TWeakObjectPtr<UNavReadyCellComponent>, ENavReadyCellState>> Pending;
+if (UNavReadyCellComponent* Cell = Pending[i].Key.Get()) { … }   // nullptr if the cell was destroyed meanwhile
+```
+- `TPair<A, B>` holds two values (`.Key`, `.Value`). `TWeakObjectPtr` refers to a UObject without keeping it alive; `Get()` returns `nullptr` once it is gone.
+- **In our code:** the queued state changes.
