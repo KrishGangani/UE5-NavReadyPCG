@@ -15,6 +15,20 @@
 | Two modules with the same name (e.g. calling the plugin `NavReadyPCG` like the game module) | UBT silently keeps one of them | A unique name: `NavReadyPCGCore` ([research/04](Research/04_local_engine_verification.md) §0) |
 | Planning on the **Test** configuration with a launcher engine | "Targets cannot be built in the Test configuration with this engine distribution" | Headline builds are packaged Development (found by UE5-UpdateBudget) |
 | `sed -i` on a Windows batch file in Git Bash | `file` reports "ASCII text" instead of "with CRLF line terminators" | Re-apply CRLF after any scripted edit; `.gitattributes` keeps `*.bat` as CRLF in the repository |
+| `call :step … \|\| exit /b` to stop a batch script at the first failure (found in S1) | The queue reports **exit 0** for a job whose build failed: under `cmd /c`, `exit /b` without a number returned 0 (reproduced: 0 instead of 6) | `if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%` on the line after each `call` (`05` B6). Not `if errorlevel 1`: it means "1 or more", so a crash's negative code (`-1073741819`) passes it. Never trust a job's exit code until a deliberately failing step has been seen to fail it |
+
+## Using PCG from C++ (S1)
+
+| Mistake | How to spot it | How to prevent it |
+|---|---|---|
+| Creating a node whose settings class isn't exported (e.g. `UPCGCreatePointsGridSettings`, plain `UCLASS(BlueprintType)`) | Linker error on `StaticClass()` | Use exported (`MinimalAPI`) settings; the rock field samples the cell's box with `UPCGVolumeSamplerSettings` (`05` B1) |
+| Writing `FPCGRuntimeGenerationRadii` members directly | `error C2248: cannot access protected member` | They are `BlueprintReadWrite` UPROPERTYs: write them through reflection, then call `ComputeHash()` (`05` B2) |
+| Using an engine struct's `StaticStruct()` when the struct isn't exported (`FPerQualityLevelFloat`) | Linker error | Compare the reflected struct by name (`05` B2) |
+| Trusting `UPCGGraph::AddEdge` or `AddLabeledEdge` to report success | `AddEdge` always returns the target node; `AddLabeledEdge` returns "did the target pin drop other edges" (`PCGGraph.h:504`), so it is `false` both on success and on a missing pin. Made in S1: a correct graph was reported as "could not wire" | Check the target pins with `UPCGNode::IsInputPinConnected` (`05` B1) |
+| Using `PCGInputOutputConstants::DefaultInputLabel` ("Input") as the graph input node's pin | `LogPCG: Error: From node DefaultInputNode does not have the Input label` | The input node's static pin is `PCGPinConstants::DefaultInputLabel` ("In", `PCGInputOutputSettings.cpp:27–36`) |
+| Passing a `UPCGGraph*` where `UPCGGraphInterface*` is expected with only a forward declaration | `cannot convert argument 1 from 'UPCGGraph *' to 'UPCGGraphInterface *'` | Include `PCGGraph.h`: the compiler needs the full class to know the inheritance |
+| Leaving a runtime component's generation radius at the default | Every cell generates at once: the default `RadiusUnbounded` is `(1u << 31) × 2` cm | `bOverrideGenerationRadii = true` and a real radius (`05` B2) |
+| Expecting runtime generation in a map without a saved PCG world actor | Nothing generates; the scheduler only ticks `if (PCGWorldActor)` | Spawn an `APCGWorldActor` at runtime (`05` B3) |
 
 ## Engine traps the design avoids (found in Phase 2)
 

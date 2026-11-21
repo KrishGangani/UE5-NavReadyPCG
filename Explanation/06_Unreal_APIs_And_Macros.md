@@ -109,3 +109,139 @@
 6. **Common mistakes.** Forgetting that commands run **deferred** (not before the first frame); separating commands with spaces instead of commas; unquoted values containing commas.
 7. **Example.** `-ExecCmds="pcg.FrameTime,quit"`
 8. **In this project.** The smoke scripts print `pcg.FrameTime`, `pcg.RuntimeGeneration.NumGeneratingComponents` and `ai.navigation.MaxDirtyAreasCountWhileSuspended`, then `quit`. "LastSetBy: Constructor" confirms each value is the engine default in this build (5, 16 and 32768; the same values the source declares, `01b` §2–3).
+
+---
+
+## APIs added in step S1 (the world spike)
+
+| # | API | Where |
+|---|---|---|
+| 7 | `UCLASS` / `UPROPERTY` / `GENERATED_BODY`, `TObjectPtr` | every S1 class |
+| 8 | `UWorldSubsystem` / `UTickableWorldSubsystem` | `UNRBenchmarkSubsystem` |
+| 9 | `SpawnActor`, `SpawnActorDeferred` + `FinishSpawning`, `CreateDefaultSubobject`, `NewObject` + `RegisterComponent` | director, cell actor |
+| 10 | `UPCGComponent` for runtime generation | `ANRCellActor` |
+| 11 | `UPCGGraph` built in code: `AddNodeOfType`, `AddEdge`, `IsInputPinConnected`; Volume Sampler; Static Mesh Spawner | `NRGraphFactory` |
+| 12 | `APCGWorldActor` spawned at runtime | director |
+| 13 | Navigation at runtime: `ANavMeshBoundsVolume`, `OnNavigationBoundsUpdated`, `RuntimeGeneration`, `CrowdManagerClass` | director, config |
+| 14 | Navigation queries: `FindPathSync`, `FPathFindingQuery`, `ProjectPointToNavigation`, `IsNavigationBuildInProgress`, `HasDirtyAreasQueued` | director |
+| 15 | Reflection writes: `FindPropertyByName`, `CastField<FStructProperty>`, `ContainerPtrToValuePtr` | `ANRCellActor` |
+| 16 | Small utilities: `FParse`, `LoadObject`, logging, `RequestExit` / `RequestExitWithStatus`, `ComponentHasTag`, `SetViewTarget` | director |
+
+## 7. `UCLASS` / `UPROPERTY` / `GENERATED_BODY`, `TObjectPtr`
+
+1. **What it is.** Macros that register a class and its members with Unreal's reflection system; Unreal Header Tool (UHT) reads them and generates code (`*.generated.h`, `*.gen.cpp`). `TObjectPtr<T>` is the member pointer type for UObjects in UE5.
+2. **Why it exists.** Reflection gives garbage collection, serialization, Blueprint access, the editor's property panels and network replication. GC can only see references that are reflected.
+3. **How it works.** `GENERATED_BODY()` expands into the generated declarations (`StaticClass()`, constructors, and so on). A `UPROPERTY` object reference is reported to the garbage collector, which keeps the object alive and nulls the reference if the object is destroyed (at the next GC).
+4. **When to use it.** For every UObject member a class owns or must keep alive.
+5. **When not to.** Plain data that no system needs to see (counters, timestamps) doesn't need `UPROPERTY`.
+6. **Common mistakes.** A raw `UObject*` member without `UPROPERTY` (GC can free the object under you); forgetting that `IsValid()` is still needed between a `Destroy()` and the next GC.
+7. **Example.** `UPROPERTY(Transient) TObjectPtr<UPCGGraph> Graph;`
+8. **In this project.** The director holds the graph, the cube mesh, the test cell and the camera as `UPROPERTY(Transient)` members (transient: never saved). The cell actor's two components are `UPROPERTY(VisibleAnywhere)`, shown read-only in the editor.
+
+## 8. `UWorldSubsystem` / `UTickableWorldSubsystem`
+
+1. **What it is.** A UObject the engine creates automatically for every world, with the world's lifetime (`Runtime/Engine/Public/Subsystems/WorldSubsystem.h`). The tickable variant is also an `FTickableGameObject`.
+2. **Why it exists.** World-scoped managers without placing an actor in a map.
+3. **How it works.** `Initialize` when the world is created; `OnWorldBeginPlay` once play starts (before actors' `BeginPlay`); `Deinitialize` at teardown. A tickable subsystem's `Tick` runs with the other tickable objects after `TG_PostPhysics` (`LevelTick.cpp:1821`). `DoesSupportWorldType` filters which worlds get one.
+4. **When to use it.** One-per-world systems: our director now, NavReady's pipeline from S3.
+5. **When not to.** Per-actor state (use a component), or state that must outlive a world (`UGameInstanceSubsystem`).
+6. **Common mistakes.** Forgetting that editor worlds get subsystems too; doing world set-up in `Initialize` (actors can't be spawned yet); a tickable that does work when it has nothing to do.
+7. **Example.** `bool DoesSupportWorldType(const EWorldType::Type T) const override { return T == EWorldType::Game || T == EWorldType::PIE; }`
+8. **In this project.** `UNRBenchmarkSubsystem`: Game and PIE worlds only; builds the arena in `OnWorldBeginPlay`; its `Tick` returns at once unless `-NRSpike` was given.
+
+## 9. Spawning actors and components at runtime
+
+1. **What it is.** `UWorld::SpawnActor<T>(…)`, `UWorld::SpawnActorDeferred<T>(…)` + `AActor::FinishSpawning(…)` (`World.h`), `CreateDefaultSubobject<T>(Name)` in a constructor, `NewObject<T>(Outer, Name)` + `RegisterComponent()` for a component created later.
+2. **Why it exists.** Actors and components need engine-side registration (render, physics, navigation state) that `new` would skip.
+3. **How it works.** `SpawnActor` constructs, registers components and runs `BeginPlay`. The deferred version stops before `BeginPlay`/construction scripts until `FinishSpawning`, so properties can be set first. Components register during the spawn itself (`Actor.cpp:4332–4336`).
+4. **When to use it.** Deferred spawn whenever a component reads its settings in `BeginPlay`.
+5. **When not to.** Don't defer when nothing needs configuring: an unfinished deferred actor is a half-alive object.
+6. **Common mistakes.** Forgetting `FinishSpawning` on an error path (fixed in S1 by `Destroy()`); creating a component with `NewObject` and never registering it (it never renders or collides); attaching after registering.
+7. **Example.**
+   ```cpp
+   ANRCellActor* Cell = World.SpawnActorDeferred<ANRCellActor>(ANRCellActor::StaticClass(), Transform);
+   Cell->Configure(...);
+   Cell->FinishSpawning(Transform);
+   ```
+8. **In this project.** Cells are spawned deferred (their PCG component registers in `BeginPlay`); the floor, bounds volume, PCG world actor and camera with plain `SpawnActor`; the bounds volume's extent box with `NewObject` → `SetupAttachment` → `RegisterComponent`.
+
+## 10. `UPCGComponent` for runtime generation
+
+1. **What it is.** The component that runs a PCG graph for its actor (`Plugins/PCG/Source/PCG/Public/PCGComponent.h`).
+2. **Why it exists.** It owns the graph instance, the seed, the generated resources and the generation state.
+3. **How it works.** With `GenerationTrigger = GenerateAtRuntime` (`:77–82`) it registers with the PCG subsystem in `BeginPlay` (`PCGComponent.cpp:1743–1767`), and the runtime-generation scheduler generates it when a generation source is within its radius of its bounds (`PCGRuntimeGenScheduler.cpp:937–983`). Native delegates report start, generated, cancelled and cleaned (`PCGComponent.h:380–383`).
+4. **When to use it.** Content that should appear around the player at runtime.
+5. **When not to.** Content that can be baked in the editor (`GenerateOnLoad` with saved output is cheaper at runtime).
+6. **Common mistakes.** Leaving the radius at the graph default (effectively unlimited: everything generates at once); expecting the scheduler without a PCG world actor (§12); missing the scheduling policy object on a component created in code; writing the protected radius members directly (§15).
+7. **Example.** see `ANRCellActor::Configure` (`05` B2).
+8. **In this project.** One non-partitioned runtime component per cell; radius 35 m, cleanup scalar 100 (never during a run), seed per cell, `UPCGSchedulingPolicyDistanceAndDirection` created explicitly, graph assigned with `SetGraphLocal`.
+
+## 11. `UPCGGraph` built in code
+
+1. **What it is.** The graph asset type, here created in memory: `UPCGGraph::AddNodeOfType<TSettings>(TSettings*&)`, `AddEdge`, plus `UPCGNode::IsInputPinConnected` (`PCGGraph.h:454, 477`; `PCGNode.h:106`).
+2. **Why it exists.** Tools and tests build graphs programmatically; the functions are outside `WITH_EDITOR`, so they work in a packaged game (proved in S1).
+3. **How it works.** A new graph already has an input and an output node. `AddNodeOfType` creates a node with a settings object of the given class; `AddEdge` connects an output pin to an input pin by label.
+4. **When to use it.** When a graph must be reviewable as text or generated from data.
+5. **When not to.** For artist-authored content: an editor asset is easier to iterate on.
+6. **Common mistakes.** Using a settings class that isn't exported (link error: Create Points Grid, Create Points, Random Choice); trusting `AddEdge`/`AddLabeledEdge` to report success (`07`, "Using PCG from C++"); using the wrong input-node label (`"In"`, not `"Input"`).
+7. **Example.** see `NRGraphFactory::BuildRockFieldGraph` (`05` B1).
+8. **In this project.** Input `"In"` → Volume Sampler (`"Volume"`) → Static Mesh Spawner, with one weighted mesh entry: collision `BlockAll`, *Can Ever Affect Navigation* per configuration.
+
+## 12. `APCGWorldActor` at runtime
+
+1. **What it is.** PCG's per-world settings actor (`PCGWorldActor.h:16–17`: `MinimalAPI, NotBlueprintable, NotPlaceable`), normally created by the editor and saved in the level.
+2. **Why it exists.** It holds world-wide PCG settings (partition grid size, generation-source options) and is the anchor the runtime scheduler requires.
+3. **How it works.** It registers with the PCG subsystem in `BeginPlay` (`PCGWorldActor.cpp:187–191`); the subsystem ticks the scheduler only `if (PCGWorldActor)` (`PCGSubsystem.cpp:425–428`) and never creates one at runtime (`:431–443`).
+4. **When to use it.** Spawn one at runtime only when the map has none (a level built by code, as here).
+5. **When not to.** In an authored map: the editor creates and saves it.
+6. **Common mistakes.** Spawning two (the second merges into the first, `PCGSubsystem.cpp:648–659`); expecting runtime generation without one.
+7. **Example.** `World.SpawnActor<APCGWorldActor>(APCGWorldActor::StaticClass(), FTransform::Identity, SpawnParams);`
+8. **In this project.** Spawned once in `BuildArena`. **Measured in S1:** with it, the scheduler generated the test cell when the camera came within 35 m, in a packaged build.
+
+## 13. Navigation at runtime
+
+1. **What it is.** `ANavMeshBoundsVolume` (`NavigationSystem/Public/NavMesh/NavMeshBoundsVolume.h:16–17`, `MinimalAPI`), `UNavigationSystemV1::OnNavigationBoundsUpdated(ANavMeshBoundsVolume*)` (public, `BlueprintCallable`), and two config properties: `ANavigationData::RuntimeGeneration` and `UNavigationSystemV1::CrowdManagerClass`.
+2. **Why it exists.** Navigation is built inside bounds volumes; runtime levels need runtime bounds.
+3. **How it works.** A volume reports its area as its components' bounding box (`NavigationSystem.cpp:4400–4413`). When bounds appear and there is no navigation data, the engine spawns it (`:4375–4390`) and builds it if its `RuntimeGeneration` isn't `Static`.
+4. **When to use it.** Levels generated or assembled at runtime.
+5. **When not to.** Authored levels, where volumes and navmesh are built and saved in the editor (cheaper: no runtime build).
+6. **Common mistakes.** Spawning a volume and expecting the brush to have a size (it has none at runtime); leaving `RuntimeGeneration=Static` (the engine warns and builds once, and never again); keeping the crowd manager without crowd agents (a warning at every exit in this set-up).
+7. **Example.** see `BuildArena` (`05` B3).
+8. **In this project.** A runtime volume with a 200 m × 200 m × 10 m box; `RuntimeGeneration=Dynamic`; no crowd manager. **Measured in S1:** a complete 268.7 m path corner to corner within 0.06–0.35 s of start.
+
+## 14. Navigation queries
+
+1. **What it is.** `UNavigationSystemV1::FindPathSync(FPathFindingQuery, …)` (`NavigationSystem.h:658`) → `FPathFindingResult` (`NavigationData.h:57–70`); `ProjectPointToNavigation(Point, Out, Extent, NavData)` (`NavigationSystem.h:718`); `IsNavigationBuildInProgress()`, `HasDirtyAreasQueued()`, `GetDefaultNavDataInstance(DontCreate)`.
+2. **Why it exists.** Ask the navmesh for a path, the nearest navigable point, and whether it is busy.
+3. **How it works.** `FPathFindingQuery(Owner, NavData, Start, End)` (`NavigationSystemTypes.h:60`) runs an A* search on the Recast navmesh on the calling thread. `ProjectPointToNavigation` finds navmesh within a box around a point.
+4. **When to use it.** Synchronous queries are fine for checks and small numbers of agents; S4's agents use `FindPathSync` at a fixed rate.
+5. **When not to.** Hundreds of queries per frame: use `FindPathAsync`.
+6. **Common mistakes.** Treating `IsSuccessful()` as "complete" (check `IsPartial()` too); a projection extent so tall it finds navmesh on top of an obstacle (fixed in S1); `GetDefaultNavDataInstance()` with the creating overload in a query path.
+7. **Example.** `const FPathFindingResult R = NavSys->FindPathSync(FPathFindingQuery(this, *NavData, Start, End));`
+8. **In this project.** The spike's navmesh and carve checks; the readiness probe (S3) and agents (S4) build on the same calls.
+
+## 15. Writing a reflected property: `FindPropertyByName`, `CastField`, `ContainerPtrToValuePtr`
+
+1. **What it is.** Reflection access to a `UPROPERTY` by name: `UStruct::FindPropertyByName`, `CastField<FStructProperty>`, `FProperty::ContainerPtrToValuePtr<T>(Container)` (`CoreUObject/Public/UObject/UnrealType.h`).
+2. **Why it exists.** It is how Blueprint, serialization and the editor read and write properties without compile-time access.
+3. **How it works.** A property object knows its offset inside its owning struct or class; `ContainerPtrToValuePtr` adds that offset to the container's address.
+4. **When to use it.** Only when a property is reflected but not reachable from C++ (protected, as `FPCGRuntimeGenerationRadii`'s radii are).
+5. **When not to.** Whenever a public member or setter exists: reflection by name fails only at run time, not at compile time.
+6. **Common mistakes.** Not checking the property's type before writing through the pointer; assuming a name survives engine upgrades (check and log, as `SetRadiiMember` does); forgetting a follow-up the setter would have done (`ComputeHash()` here).
+7. **Example.** see `NRCell::SetRadiiMember` (`05` B2).
+8. **In this project.** Two writes per cell, at spawn. The struct type is compared by name because `FPerQualityLevelFloat::StaticStruct()` isn't exported.
+
+## 16. Small utilities used in S1
+
+| API | Use here | Note |
+|---|---|---|
+| `FCommandLine::Get()`, `FParse::Param`, `FParse::Value` | `-NRSpike`, `-NRExit`, `-NRTimeout=` | `Param` matches `-Name`; `Value` reads after `Name=` |
+| `LoadObject<UStaticMesh>(nullptr, Path)` | the cube, once, at begin play | synchronous; the folder must be cooked (`DirectoriesToAlwaysCook`) |
+| `DEFINE_LOG_CATEGORY_STATIC`, `UE_LOG` | `LogNRBench`, `LogNRGraph`, `LogNRCell` | file-local categories; `Error` lines make failures visible in the queue log |
+| `FPlatformMisc::RequestExit(false)` / `RequestExitWithStatus(true, 1)` | exit after the checks | on Windows only the forced form returns a non-zero code (`WindowsPlatformMisc.cpp:1493–1521`) |
+| `UActorComponent::ComponentHasTag`, `AActor::GetComponents` | finding PCG-generated components | PCG tags them `"PCG Generated Component"` (`PCGHelpers.h:35`) |
+| `ACameraActor`, `APlayerController::SetViewTarget` | the generation source | PCG's player source reads the view point |
+| `UCollisionProfile::NoCollision_ProfileName` / `BlockAll_ProfileName` | volumes vs props | `BlockAll` blocks Pawn, so it affects navigation |
+| `AStaticMeshActor::SetMobility(Movable)` | the floor | Static components refuse `SetStaticMesh` after begin play |
+| `FBox::ComputeSquaredDistanceToPoint` | camera-to-cell distance | the scheduler's own measure |
+| Delegate `AddUObject(this, &Class::Method)` | PCG start/generated events | weak binding: skipped if the object is gone |

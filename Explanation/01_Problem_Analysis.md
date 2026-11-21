@@ -75,7 +75,7 @@ Each hypothesis gets a measurement that can confirm or reject it. The baseline r
 - **Arena:** a flat 200 m × 200 m floor with collision, covered by navigation bounds. Navmesh `RuntimeGeneration = Dynamic`; every other navmesh setting at its engine default (10 m tiles, 19 cm cells, 34 cm agent radius; `BaseEngine.ini:3045–3066`).
 - **Cells:** a 4 × 4 grid of 30 m × 30 m cells, centred: 16 cells, each aligned to a 3 × 3 block of navmesh tiles where the tile origin allows (checked in S2).
 - **Content per cell:** one PCG graph, the same for every cell, seeded per cell:
-  - Create Points Grid at about 3 m spacing → Transform Points (seeded jitter, random yaw, scale 0.6–1.4) → a deterministic thinning to about half → Static Mesh Spawner;
+  - a Volume Sampler filling the cell's box at about 3 m spacing (S1: Create Points Grid's settings class isn't exported) → Transform Points (seeded jitter, random yaw, scale 0.6–1.4) → a deterministic thinning to about half → Static Mesh Spawner;
   - two meshes (`/Engine/BasicShapes/Cube` and `Cylinder`), so two ISM components per cell;
   - collision `BlockAll`, so every prop changes the navmesh.
   - About 50 props per cell, about 800 in total. The exact density is **calibrated in S2** (like UE5-UpdateBudget's compute calibration): high enough that B0 shows the problem, low enough that cells don't enclose unreachable pockets.

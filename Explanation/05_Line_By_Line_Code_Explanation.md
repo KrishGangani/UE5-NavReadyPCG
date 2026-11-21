@@ -5,7 +5,8 @@
 | Part | Step | Files |
 |---|---|---|
 | A | Phase 4, F1–F3 (foundation) | `.uproject`, two `Target.cs`, two `Build.cs`, two module `.cpp`, `.uplugin`, three config `.ini`, `Tools\*.bat`, `Tools\cpu_affinity.py` |
-| B onwards | S1–S7 | written with each step |
+| B | S1 (world spike) | `NRGraphFactory`, `NRCellActor`, `NRBenchmarkSubsystem` (S1 version), `NavReadyPCG.Build.cs`, config, `Tools\run_packaged.bat`, `s1_checks.bat` |
+| C onwards | S2–S7 | written with each step |
 
 ---
 
@@ -204,3 +205,153 @@ Not used in Phase 4 (nothing is timed yet), but written now because the measurem
 **Self-test (2026-11-21):** the script's own mask was `0xFFFFFF` (all 24 logical CPUs) before `pin_self` and `0xFFFF` after; a PowerShell child started with `run_game` reported its `ProcessorAffinity` as 65535 (= `0xFFFF`), so it inherited the mask; `run_game(["cmd", "/c", "exit 3"], 10)` returned 3; a 6-second `ping` with a 1-second timeout returned `None` and was killed.
 
 **Phase 4 results** are recorded in [09_Testing_And_Benchmarks.md](09_Testing_And_Benchmarks.md) (F-1 to F-6).
+
+---
+
+## Part B · Step S1: the world spike
+
+**What S1 had to prove (`03` S1, `01b #8`):** that a world built entirely at runtime, in a **packaged** build, gets a navmesh and runs PCG's runtime-generation scheduler. Result: it does (`09` S1). Everything below is the code that proves it, and most of it stays as the base of the benchmark director.
+
+**Files:** `Private\NRGraphFactory.h/.cpp` (B1), `Public\NRCellActor.h` + `Private\NRCellActor.cpp` (B2), `Public\NRBenchmarkSubsystem.h` + `Private\NRBenchmarkSubsystem.cpp` (B3), `NavReadyPCG.Build.cs` (B4), config (B5), `Tools\` (B6).
+
+### B1. `NRGraphFactory.h` / `.cpp`: the PCG graph, built in code
+
+```cpp
+namespace NRGraphFactory
+{
+	struct FRockFieldParams { FVector VoxelSize = FVector(300.0, 300.0, 1000.0); TSoftObjectPtr<UStaticMesh> Mesh; bool bNavigationVisible = true; };
+	UPCGGraph* BuildRockFieldGraph(UObject* Outer, const FRockFieldParams& Params);
+}
+```
+
+| Line | What it does, and why |
+|---|---|
+| `namespace NRGraphFactory` + free functions | No state, no lifetime: a namespace of functions is enough (`02` §4.2). *Rejected:* a `UObject` "factory" class, which would need its own lifetime for nothing |
+| `struct FRockFieldParams` | Every graph setting in one plain struct, so the director can vary them per run (S2 adds the transform and thinning parameters) |
+| `VoxelSize = (300, 300, 1000)` | One point every 3 m in X and Y. Z is larger than the cell box is tall, so there is exactly one layer of points |
+| `TSoftObjectPtr<UStaticMesh> Mesh` | The spawner's mesh entry stores a soft reference (`FPCGMeshSelectorWeightedEntry(TSoftObjectPtr<UStaticMesh>, int)`); the director passes the already-loaded cube, so nothing is loaded asynchronously during generation |
+| `bNavigationVisible` | Becomes the spawner descriptor's *Can Ever Affect Navigation*: `true` in S1 and the baselines, `false` for NavReady (`02` §9) |
+| `NewObject<UPCGGraph>(Outer, NAME_None, RF_Transient)` | A graph object that lives only in memory. `Outer` (the director) keeps it alive through the director's `UPROPERTY` reference; `RF_Transient` says it is never saved |
+| `AddNodeOfType<UPCGVolumeSamplerSettings>(Sampler)` | Adds a node and returns its settings object through the reference parameter. **Why a Volume Sampler, not Create Points Grid:** `UPCGCreatePointsGridSettings` is declared `UCLASS(BlueprintType)` with no `MinimalAPI`/`PCG_API` (`Plugins/PCG/Source/PCG/Public/Elements/PCGCreatePointsGrid.h:27`), so its `StaticClass()` is not exported and can't be linked from our module. `UPCGVolumeSamplerSettings` is `MinimalAPI` (`PCGVolumeSampler.h:65`) and samples a regular voxel grid inside its input volume, which gives the same grid of points |
+| `Sampler->VoxelSize = Params.VoxelSize` | A public `UPROPERTY` (`PCGVolumeSampler.h:74`). Writing a data member needs no export, only the class layout from the header |
+| `AddNodeOfType<UPCGStaticMeshSpawnerSettings>(Spawner)` | The spawner (`MinimalAPI`, `PCGStaticMeshSpawner.h:26`). Its constructor already creates a `UPCGMeshSelectorWeighted` (`PCGStaticMeshSpawner.cpp`, constructor) |
+| `CastChecked<UPCGMeshSelectorWeighted>(Spawner->MeshSelectorParameters)` | `CastChecked` asserts instead of returning null: if the engine ever changes the default selector, the build fails loudly here rather than generating nothing |
+| `MeshEntries.Emplace_GetRef(Params.Mesh, 1)` | Adds one weighted entry (weight 1, the only entry) and returns a reference to it, so its descriptor can be edited in place |
+| `Entry.Descriptor.BodyInstance.SetCollisionProfileName(BlockAll)` | PCG's descriptor defaults to `NoCollision` (`PCGISMDescriptor.cpp:11–19`). `BlockAll` blocks Pawn, which is what makes the props navigation-relevant (`01b #2`) |
+| `Entry.Descriptor.bCanEverAffectNavigation = …` | The per-mesh-entry flag NavReady relies on (`ISMComponentDescriptor.h:236–237`) |
+| `AddEdge(GetInputNode(), PCGPinConstants::DefaultInputLabel, SamplerNode, VolumeLabel)` | The graph input node's output pin is `"In"` (`PCGPinConstants::DefaultInputLabel`, `PCGInputOutputSettings.cpp:27–36`). For a PCG component on an actor it carries the actor's data; our cell actor's `UBoxComponent` becomes analytic collision-shape data (`Data/Registry/PCGGetDataFunctionRegistry.cpp:321–327`), which the sampler fills with points. **Found in S1:** the similarly named `PCGInputOutputConstants::DefaultInputLabel` is `"Input"` and doesn't exist on the input node (`LogPCG: Error: From node DefaultInputNode does not have the Input label`) |
+| `AddEdge(SamplerNode, DefaultOutputLabel, SpawnerNode, DefaultInputLabel)` | Points → spawner. Nothing is wired to the graph output node: spawners act through side effects, and the compiler only culls nodes whose **inputs** are unwired (`Graph/PCGGraphCompiler.cpp:790–815`) |
+| `IsInputPinConnected(…)` checks | **Neither edge function reports success:** `AddEdge` always returns the target node, and `AddLabeledEdge` returns whether the target pin *dropped other edges* (`PCGGraph.h:504`), so it is `false` on success too. S1's second run reported a correct graph as "could not wire" because of that. The target pins themselves are the reliable check (`PCGNode.h:106`) |
+| `return nullptr` + `UE_LOG(Error)` | A graph that isn't wired generates nothing; the caller refuses to spawn a cell with it |
+
+### B2. `NRCellActor.h` / `.cpp`: one cell
+
+| Line | What it does, and why |
+|---|---|
+| `UCLASS() class ANRCellActor : public AActor` | An actor, because PCG spawns its instance components *onto an actor* (the component's owner, by default). Not exported (no `_API`): only this module uses it |
+| `UPROPERTY(VisibleAnywhere) TObjectPtr<UBoxComponent> Bounds` | The cell volume. `UPROPERTY` makes the reference visible to GC and reflection; `TObjectPtr` is the 5.x member pointer type for UObjects (`06` §7) |
+| `UPROPERTY(VisibleAnywhere) TObjectPtr<UPCGComponent> PCG` | The generator. `UPCGComponent` is only forward-declared in the header, so the header doesn't need PCG's include path (`B4`) |
+| Constructor: `PrimaryActorTick.bCanEverTick = false` | Cells never tick; PCG and the director do the work |
+| `CreateDefaultSubobject<UBoxComponent>(TEXT("Bounds"))` | Creates the component as part of the class's default object, so every instance gets one; the name must be unique within the actor |
+| `SetCollisionProfileName(NoCollision)`, `SetGenerateOverlapEvents(false)` | The box is a volume for PCG only; physics never sees it |
+| `SetCanEverAffectNavigation(false)` | Shape components can affect navigation by default (`ShapeComponent.cpp:61`). A cell volume must not change the navmesh |
+| `PCG->GenerationTrigger = GenerateAtRuntime` | Hands the component to PCG's runtime-generation scheduler (`PCGComponent.h:77–82`) |
+| `bool Configure(Graph, Seed, HalfExtent, GenerationRadius)` | Everything the component needs before its `BeginPlay`, where it registers with the PCG subsystem (`PCGComponent.cpp:1743–1767`). That is why the director spawns cells deferred and calls this before `FinishSpawning` |
+| `Bounds->SetBoxExtent(HalfExtent, false)` | Sets the cell size; `false` = don't update overlaps (there are none) |
+| `PCG->Seed = Seed` | The component seed (`PCGComponent.h:314`). S2 gives each cell its own |
+| `SetRadiiMember(…)` (reflection) | Non-partitioned runtime components generate when a generation source comes within `RadiusUnbounded` of their bounds (`PCGRuntimeGenScheduler.cpp:937–983`). The default is `(1u << 31) × 2` cm (`PCGCommon.h:551, 626`): effectively "generate now". `RadiusUnbounded` and `CleanupRadiusScalar` are **protected** C++ members (`PCGCommon.h:623–660`) but `BlueprintReadWrite` UPROPERTYs, so the code writes them through reflection, the same path a Blueprint uses: find `UPCGComponent::GenerationRadii` as an `FStructProperty`, find the member inside its struct, check it is an `FPerQualityLevelFloat`, then write through `ContainerPtrToValuePtr`. The type is compared **by name** because `FPerQualityLevelFloat` isn't exported from the Engine module, so its `StaticStruct()` can't be linked (`PerQualityLevelProperties.h:268–269`) |
+| `CleanupRadiusScalar = 100` | Cleanup happens beyond radius × scalar: 3.5 km here, so no cell is cleaned up during a run (`01` §6.1) |
+| `bOverrideGenerationRadii = bRadiiSet` | The override is switched on only if both writes succeeded; otherwise `Configure` returns `false` and the director destroys the cell instead of letting it generate at once (code-review finding) |
+| `GenerationRadii.ComputeHash()` | "Call this anytime the values are changed" (`PCGCommon.h:615–616`) |
+| `SetSchedulingPolicyClass(UPCGSchedulingPolicyDistanceAndDirection::StaticClass())` | The constructor only sets the policy **class** (`PCGComponent.cpp:118`); the scheduler `ensure`s that a policy **object** exists (`PCGRuntimeGenScheduler.cpp:937`). This call creates it (`PCGComponent.cpp:1372–1376`) |
+| `PCG->SetGraphLocal(Graph)` | Assigns the graph without the network-multicast wrapper `SetGraph` has. `PCGGraph.h` is included so the compiler knows `UPCGGraph` derives from `UPCGGraphInterface` (with only a forward declaration the conversion fails: `error C2664`) |
+| `GetCellBounds()` | The box's world bounds (`Bounds->Bounds`, updated when the component registers) |
+| `GetGeneratedComponents(Out)` | Every `UInstancedStaticMeshComponent` on the actor, minus those without PCG's `"PCG Generated Component"` tag (`PCGHelpers.h:35`). One helper, used by the spike now and by the hash (S2) and the commit (S5) later (simplify finding: the loop was written twice) |
+
+### B3. `NRBenchmarkSubsystem.h` / `.cpp`: the director (S1 version)
+
+**Class and lifetime**
+
+| Line | What it does, and why |
+|---|---|
+| `UCLASS() class UNRBenchmarkSubsystem : public UTickableWorldSubsystem` | One instance per world, created and destroyed with it, ticking every frame (`06` §8). *Rejected:* a director actor (nothing would place it: there is no authored map) |
+| `DoesSupportWorldType` → Game, PIE | World subsystems exist in editor worlds too; the director must never build an arena there |
+| `OnWorldBeginPlay(UWorld&)` | Runs once, before actors' `BeginPlay` (UE5-UpdateBudget `01b` §3). Reads the command line, then builds the arena and the test cell |
+| `FParse::Param(CommandLine, TEXT("NRSpike"))` | `true` if `-NRSpike` is present. Without it the world stays the plain template map (Phase 4's smoke runs behave exactly as before) |
+| `FParse::Value(CommandLine, TEXT("NRTimeout="), TimeoutSeconds)` | Optional; the default 60 s is used when absent |
+| `if (!BuildArena(InWorld) \|\| !SpawnTestCell(InWorld)) { FinishChecks(0.0); return; }` | On a set-up failure the summary line is still printed and every check reported as failed (code-review finding: an early return used to skip the summary) |
+| `GetStatId()` with `RETURN_QUICK_DECLARE_CYCLE_STAT` | Required by tickable objects; names the tick in `stat` output |
+
+**`BuildArena`**
+
+| Line | What it does, and why |
+|---|---|
+| `LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"))` | A synchronous load of the engine cube (cooked because `DefaultGame.ini` lists `/Engine/BasicShapes`, B5). Loading once here means generation never waits on an asynchronous mesh load |
+| `NRBench::ArenaCenter = (100000, 0, 0)` | 1 km from the origin, away from the template map's own floor (`SM_Template_Map_Floor`, at the origin) so the arena's navigation bounds contain only our geometry |
+| `SpawnParams.SpawnCollisionHandlingOverride = AlwaysSpawn` | Never refuse or nudge a spawn because something overlaps |
+| Floor: `SpawnActor<AStaticMeshActor>` → `SetMobility(Movable)` → `SetStaticMesh` → `SetActorScale3D` | A 200 m × 200 m × 10 cm slab, top at z = 0. **Movable** because `SetStaticMesh` refuses to change a Static component once the world has begun play (`StaticMeshComponent.cpp`, `SetStaticMesh`: "Calling SetStaticMesh on '…' but Mobility is Static"). Setting the mesh also re-registers the component with navigation (`FNavigationSystem::UpdateComponentData`, same function) |
+| `SpawnActor<ANavMeshBoundsVolume>` + a `UBoxComponent` "ArenaExtent" | A bounds volume spawned at runtime has no brush geometry (the editor builds that), so on its own it reports no area. Navigation takes a volume's area from `GetComponentsBoundingBox(true)` (`NavigationSystem.cpp:4400–4413`), which includes every registered primitive component, so a box with the arena's extent gives it one. The box has no collision and `SetCanEverAffectNavigation(false)` |
+| `NewObject<UBoxComponent>(Volume, …)` → `SetupAttachment` → `RegisterComponent` | Creating a component at runtime: construct it with the actor as outer, attach it before registering, then register (which creates its render/physics/navigation state) |
+| `NavSys->OnNavigationBoundsUpdated(Volume)` | The volume registered itself during the spawn with an empty box (`NavMeshBoundsVolume.cpp:117–125`); this sends the real box as an `Updated` request (`NavigationSystem.cpp`, `OnNavigationBoundsUpdated`). The engine then **spawns the missing `RecastNavMesh` itself** (`NavigationSystem.cpp:4375–4390`); with `RuntimeGeneration=Dynamic` configured it does so without a warning (`:4661–4668` warns only for `Static`), and builds it |
+| `SpawnActor<APCGWorldActor>(APCGWorldActor::StaticClass(), …)` | Runtime generation only ticks when a PCG world actor is registered (`PCGSubsystem.cpp:425–428`), and nothing creates one at runtime (`:431–443`). It registers itself in `BeginPlay` (`PCGWorldActor.cpp:187–191`). `StaticClass()` links because the class is `MinimalAPI` (`PCGWorldActor.h:16`) |
+
+**`SpawnTestCell`**
+
+| Line | What it does, and why |
+|---|---|
+| `BuildRockFieldGraph(this, GraphParams)`; `if (!Graph) return false;` | The graph first: no cell is spawned for a graph that failed |
+| `SpawnActorDeferred<ANRCellActor>(…)` | Constructs the actor and its components but defers `BeginPlay` until `FinishSpawning`, so `Configure` runs first (B2) |
+| `if (!Cell->Configure(…)) { Cell->Destroy(); return false; }` | Never leaves a deferred, unfinished actor in the world (code-review finding) |
+| `OnPCGGraphStartGeneratingDelegate.AddUObject(this, …)`, `OnPCGGraphGeneratedDelegate.AddUObject(this, …)` | The component's native multicast delegates (`PCGComponent.h:380–383`). `AddUObject` binds weakly: if the director is destroyed first, the call is skipped instead of crashing |
+| `FinishSpawning(FTransform(CellLocation))` → `TestCell = Cell` | `BeginPlay` runs here: the PCG component registers with the subsystem and from then on the scheduler considers it |
+
+**Camera and the generation source**
+
+| Line | What it does, and why |
+|---|---|
+| `SpawnActor<ACameraActor>()`, `UpdateCamera(Elapsed)` | The camera starts 70 m before the cell, 15 m up, pitched −45°, and flies towards it at 5 m/s |
+| `PlayerController->SetViewTarget(Camera)`, re-applied each frame | PCG's player generation source takes its position from `PlayerController->GetPlayerViewPoint` (`RuntimeGen/GenSources/PCGGenSourcePlayer.cpp`, `Tick`), which is the view target. So the camera is what drives runtime generation |
+| `CameraDistanceToCell()` | 2D distance from the camera to the cell's box (`FBox::ComputeSquaredDistanceToPoint` with the point moved to the box's floor), the same measure the scheduler uses for non-partitioned components with a 2D grid (`PCGRuntimeGenScheduler.cpp:974–980`) |
+
+**The three checks** (each retried every frame until it passes; the run ends when all pass, when generation fails, or at the timeout)
+
+| Check | Code | Pass means |
+|---|---|---|
+| 1. Navmesh | `CheckArenaPath`: `FindPathSync(FPathFindingQuery(this, *NavData, Start, End))` corner to corner, 5 m inside the edges, 50 cm up | A complete (`IsSuccessful() && !IsPartial()`) path across the whole arena: the runtime navmesh exists and spans it |
+| 2. Runtime generation | `HandleCellGenerationStarted` records the camera distance; `HandleCellGenerated` counts instances via `GetGeneratedComponents` | Generation started within the radius but not at the very start (the camera began outside it), and produced instances: the scheduler, not something else, triggered it |
+| 3. Carve | `CheckPropCarved`: `ProjectPointToNavigation` under prop 0 and half-way to the next prop, 10 cm above the floor with a ±20 cm vertical extent, after navigation has been idle for 2 frames | No navmesh under the prop, navmesh between props: the props reached navigation **without any coordination** (`01b #2`, measured) |
+
+| Line | What it does, and why |
+|---|---|
+| `enum class EVerdict : uint8 { Pending, Pass, Fail }` | Three states, not magic `0/1/-1` integers (simplify finding) |
+| Retry until pass | A single attempt could read navigation in a transient state: the bounds update and a new component's octree registration are deferred to the next navigation tick (`01b #7`). A pass can't be transient (a complete path; floor navmesh beside a prop and none under it), so retrying removes false failures without risking false passes (code-review findings 2–4) |
+| `CarveQueryHeight = 10`, `CarveQueryExtent = (5, 5, 20)` | Only floor-level navmesh directly under the point counts; a walkable patch Recast might leave on top of a 1 m prop is out of range (code-review finding 5) |
+| `NRBench::GetNavigation(World, OutNavSys)` | One lookup of the navigation system and its default navigation data, used by both checks (simplify finding) |
+| `FinishChecks(Elapsed)` | Turns pending verdicts into failures, logs one summary line in every case, and `Error`-logs `NRSpike: FAILED.` on a failure |
+| Exit: `RequestExit(false)` on a pass, `RequestExitWithStatus(true, 1)` on a failure | **Found in S1:** a non-forced exit drops the return code on Windows: it only posts `WM_QUIT` (`Core/Private/Windows/WindowsPlatformMisc.cpp:1517–1521`), and the failed run exited 0. The forced exit flushes the log and calls `TerminateProcess(…, 1)` (`:1493–1515`), so scripts and the queue see the failure. A passing run still shuts down cleanly |
+| `ExitDelayFrames = 3` | A few frames between the verdict and the exit, so the log is written |
+
+### B4. `NavReadyPCG.Build.cs`
+
+```csharp
+PrivateDependencyModuleNames.AddRange(new string[] { "NavReadyPCGCore", "PCG", "NavigationSystem" });
+```
+
+`PCG` (cell actors, the graph, the world actor) and `NavigationSystem` (bounds volume, path queries) are **private**: the module's public headers only forward-declare `UPCGComponent`, `UPCGGraph` and `ACameraActor` (`06` §2). The `.uproject` already lists the `PCG` plugin, so UBT's project-level dependency check is satisfied (`05` A1). The empty `Public\.gitkeep` was removed: the folder now holds real headers.
+
+### B5. Configuration added in S1
+
+| File / key | Why |
+|---|---|
+| `DefaultEngine.ini` `[/Script/NavigationSystem.RecastNavMesh] RuntimeGeneration=Dynamic` | The engine default is `Static` (`BaseEngine.ini:3042–3043`), which never rebuilds at runtime; generated content needs `Dynamic` (`01b` §3). It also decides that the runtime-spawned navmesh is created without the "No saved navigation data found" warning (`NavigationSystem.cpp:4661–4668`). The S1 spike's complete arena path proves the setting takes effect |
+| `DefaultEngine.ini` `[/Script/NavigationSystem.NavigationSystemV1] CrowdManagerClass=` | No Detour crowd manager. `CrowdManagerClass` is a config property (`NavigationSystem.h:318–319`) and an empty class means none is created (`NavigationSystem.cpp:1570–1579`). **Found in S1:** with the default class, the manager looks for a Recast navmesh during world teardown, finds the runtime one already gone, and logs `LogCrowdFollowing: Warning: Unable to find RecastNavMesh instance …` (`AIModule/Private/Navigation/CrowdManager.cpp:905`) on every exit. This project uses no crowd-following agents |
+| `DefaultEngine.ini` map comment | Explains that the arena is built at runtime, 1 km from the template's floor |
+| `DefaultGame.ini` `+DirectoriesToAlwaysCook=(Path="/Engine/BasicShapes")` | The cube is referenced only from C++, never from a map, so the cooker wouldn't include it otherwise (the same rule UE5-UpdateBudget found) |
+
+### B6. `Tools\`: running and checking the packaged build
+
+| Script / change | Key lines | Why |
+|---|---|---|
+| `run_packaged.bat <LogName> [nullrhi\|gpu] ["game args"]` | `"%EXE%" %RHI% -nosound -unattended -traceautostart=0 -log -abslog="%LOG%" %~3` | Runs the packaged game once for a functional check. **The game arguments are one quoted string:** batch splits unquoted arguments at `=`, so `-NRTimeout=30` would reach the game as two words (code-review finding); `%~3` strips the quotes and the game receives the text unchanged (tested: `['-NRSpike', '-NRTimeout=30']`). The exit code is the game's own |
+| `s1_checks.bat` | build editor, build game, package, spike without and with the GPU; `:step` prints timestamps | All S1 checks in one queue job |
+| **Every check script:** `if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%` after each `call :step` | replaces `call :step … \|\| exit /b` | **Found in S1:** under `cmd /c` (how the queue runs scripts), `exit /b` with no number returned **0**: a job whose build failed was recorded as passed (reproduced: 0 instead of 6). `if errorlevel 1` would fix that but misses a crash, whose NTSTATUS code is negative (code-review finding; reproduced: `-1073741819` now stops the script). `phase4_checks.bat` had the same latent bug; its Phase 4 results were real passes (every step printed `exit=0`) |

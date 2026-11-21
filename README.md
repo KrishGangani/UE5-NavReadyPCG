@@ -4,11 +4,11 @@
 
 **Domain:** Procedural & runtime generation · navigation · **Difficulty:** ★★★★½ · **Engine:** UE 5.8.4
 
-> **Status: in progress. There are no results yet.** Phases 1–4 are done: the problem analysis, the research in the 5.8.4 engine source, the final architecture, and a project skeleton that builds, packages and runs with 0 errors and 0 warnings. The ten portfolio projects are developed in parallel, and every Unreal Engine build and benchmark runs one at a time through a machine-wide queue, so measurements stay clean. The success criteria below are **targets fixed before any pipeline code exists, not results**. Sections marked *(pending)* are filled in only from real measurements, in the phase named.
+> **Status: in progress. There are no results yet.** Phases 1–4 are done: the problem analysis, the research in the 5.8.4 engine source, the final architecture, and a project skeleton that builds, packages and runs with 0 errors and 0 warnings. Phase 5 has started: step S1 showed, in a packaged build, that the arena, its navmesh and PCG's runtime generation all work in a world built entirely at runtime. The ten portfolio projects are developed in parallel, and every Unreal Engine build and benchmark runs one at a time through a machine-wide queue, so measurements stay clean. The success criteria below are **targets fixed before any pipeline code exists, not results**. Sections marked *(pending)* are filled in only from real measurements, in the phase named.
 
 | Phase | 1 Problem | 2 Research | 3 Architecture | 4 Foundation | 5 Implementation | 6 Explanation | 7 Testing | 8 Profiling | 9 Review | 10 Portfolio |
 |---|---|---|---|---|---|---|---|---|---|---|
-| State | ✓ | ✓ | ✓ final | ✓ | next (S1 of 7) | ongoing | — | — | — | — |
+| State | ✓ | ✓ | ✓ final | ✓ | in progress (S1 of 7 ✓) | ongoing | — | — | — | — |
 
 ---
 
@@ -68,7 +68,7 @@ PCG's runtime generation scheduler and `pcg.FrameTime`; the Dynamic navmesh; nav
 
 **The gap it targets:** a per-region handshake from generated content to AI-ready navigation, with a frame bound and a determinism check, measured against the existing practices. **Gap strength: Medium.** The plan said Medium–Strong; research lowered it, because every building block is a public engine API. The value is in assembling them correctly and measuring honestly.
 
-**Main risks:** Dynamic navmesh cost; PCG API churn between versions (everything is pinned to 5.8.4); a runtime-spawned PCG world actor is unproven until step S1 (fallback: a scripted map).
+**Main risks:** Dynamic navmesh cost; PCG API churn between versions (everything is pinned to 5.8.4); a runtime-spawned PCG world actor (resolved in step S1: it works in a packaged build, so the scripted-map fallback isn't needed).
 
 ## Why studios care
 
@@ -89,7 +89,7 @@ The UE project is in [NavReadyPCG/](NavReadyPCG/) (UE 5.8.4, C++):
 | [01b_Research_Findings](Explanation/01b_Research_Findings.md) | Phase 2: verified engine behaviour (UE 5.8.4), the README claims checked, PCG feature maturity, and what it changed in the design |
 | [02_System_Architecture](Explanation/02_System_Architecture.md) | Final v1.0: modules, classes, the cell pipeline, per-frame flow, safety rules, rejected alternatives |
 | [03_Implementation_Roadmap](Explanation/03_Implementation_Roadmap.md) | The small, ordered build steps; baselines captured before the pipeline exists |
-| [04](Explanation/04_CPP_Fundamentals.md) · [05](Explanation/05_Line_By_Line_Code_Explanation.md) · [06](Explanation/06_Unreal_APIs_And_Macros.md) · [07](Explanation/07_Common_Mistakes.md) | C++ fundamentals, line-by-line code, APIs and macros, common mistakes. Written step by step with the code (current to Phase 4) |
+| [04](Explanation/04_CPP_Fundamentals.md) · [05](Explanation/05_Line_By_Line_Code_Explanation.md) · [06](Explanation/06_Unreal_APIs_And_Macros.md) · [07](Explanation/07_Common_Mistakes.md) | C++ fundamentals, line-by-line code, APIs and macros, common mistakes. Written step by step with the code (current to step S1) |
 | [09](Explanation/09_Testing_And_Benchmarks.md) | Every check and benchmark batch so far |
 | [08](Explanation/08_Debugging_And_Profiling.md) · [10](Explanation/10_Interview_Questions.md) · [11](Explanation/11_Optimization_Decisions.md) · [12](Explanation/12_Future_Scalability.md) | Debugging and profiling, interview questions, optimisation decisions, future scalability. Filled in during Phases 7–10 |
 | [Phase2_Raw_Notes/](Explanation/Phase2_Raw_Notes/README.md) | The audit trail behind 01b |

@@ -60,6 +60,53 @@ Changed since run 2: `{ "Name": "AndroidFileServer", "Enabled": false }` in the 
 
 ---
 
-## Phase 5 onwards
+## Step S1 · World spike (2026-11-21)
 
-*(Each step's checks are recorded here as they run: S1 world spike, S2 content and determinism, S3 harness, S4 baselines and the baseline capture, S5 pipeline tests, S6 telemetry.)*
+**Question (`03` S1, `01b #8`):** can a world built entirely at runtime, in a **packaged** build, get a navmesh and run PCG's runtime-generation scheduler? **Answer: yes.** The editor-scripted map fallback is not needed.
+
+All runs: packaged Development build, `Tools\s1_checks.bat` through the queue (build both targets → package → `run_packaged.bat … "-NRSpike -NRExit"` without and with the GPU).
+
+### Queue jobs, in order (failures included)
+
+| Job | Result | What it showed |
+|---|---|---|
+| `20261121_025738_2c007e` | ❌ editor build failed (3 compile errors), **but the job reported exit 0** | `FPCGRuntimeGenerationRadii` members are protected (`C2248` ×2); `SetGraphLocal` needs `PCGGraph.h` (`C2664`). And the check script's `call :step … \|\| exit /b` returned 0 under `cmd /c` (`07`, `05` B6) |
+| `20261121_030031_e2fbc3` | ❌ builds ok; spike **FAILED** in both runs, again with exit 0 | Navmesh: **PASS**. Graph wiring failed: the input node has no `"Input"` pin (`LogPCG: Error: From node DefaultInputNode does not have the Input label`). The game's non-forced exit dropped its return code. A `LogCrowdFollowing` warning at every exit |
+| `20261121_031954_8afd7b` | ❌ exit 1 (correctly reported now) | Wiring still "failed": `AddLabeledEdge` returns "did the target pin drop edges", not success (`07`) |
+| `20261121_034752_6bbeb7` | ✅ exit 0, 132.3 s | **All three checks PASS** in both runs, 0 warnings, 0 errors (table below) |
+| `20261121_041759_85fac9` | ❌ editor build failed, **exit 6 reported correctly** (the fixed script) | The simplify pass's `GetNavigation(const UWorld*, …)` helper: `FNavigationSystem::GetCurrent<T>` returns a `const T*` for a const world (`C2440`). Fixed by taking `UWorld*` |
+| `20261121_050716_007faa` | ✅ exit 0, 133.4 s | **The final S1 code** (after `code-review`, the simplify pass and the `const` fix): editor build 30.5 s and game build 31.8 s, both **0 errors, 0 warnings**; cook "Success - 0 error(s), 0 warning(s)"; all three checks PASS in both runs; 0 warnings and 0 errors in both game logs |
+
+### The three checks (job `20261121_034752_6bbeb7`; the final job `20261121_050716_007faa` repeated them: path after 0.05 / 0.37 s, generation started at 3,500 / 3,497 cm with 110 instances, carve PASS at 4.01 / 4.02 s)
+
+| # | Check | No GPU (`-nullrhi`) | GPU (RTX 5070, adapter 0) |
+|---|---|---|---|
+| S1-a | **Runtime navmesh:** a runtime bounds volume (with an added box) → the engine spawns and builds the `RecastNavMesh`; a corner-to-corner `FindPathSync` across the 200 m arena | ✅ result 3 (Success), not partial, 2 points, 268.7 m = the straight line, after 0.06 s | ✅ the same, after 0.35 s |
+| S1-b | **Runtime generation:** a runtime-spawned `APCGWorldActor`; the camera starts 55 m from the cell's box and flies in; generation must start inside the 35 m radius | ✅ started at 3,500 cm, 110 instances, generated within one frame | ✅ started at 3,498 cm, 110 instances |
+| S1-c | **Props reach navigation uncoordinated:** after generation and 2 idle navigation frames, no navmesh under prop 0, navmesh half-way to the next prop | ✅ under the prop: no; between: yes; ISM navigation-relevant: yes (4.01 s) | ✅ the same (4.02 s) |
+| S1-d | Logs | ✅ 0 warnings, 0 errors | ✅ 0 warnings, 0 errors |
+| S1-e | Builds | ✅ editor and game: 0 errors, 0 warnings; cook "Success - 0 error(s), 0 warning(s)" | |
+
+**What S1 established, beyond the question:**
+1. **Finding 2 of `01b` is now measured**, not only read in the source: CPU-spawned PCG instances with Pawn-blocking collision change the navmesh with no coordination at all (S1-c).
+2. A runtime level needs three things the engine doesn't do on its own: navigation bounds with real extent, `RuntimeGeneration=Dynamic`, and an `APCGWorldActor`. The engine does spawn the navmesh itself.
+3. **Three ways a check could falsely pass or fail were found and fixed** before any measurement depends on them: the batch exit code (0 for a failed step), the game's exit code (0 for a failed check), and two misread engine return values (`AddEdge`, `AddLabeledEdge`).
+
+### Audit trail for S1
+
+**`code-review` (medium), 10 findings, all fixed** (5 important, 5 nits):
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | `if errorlevel 1` misses a crash (NTSTATUS codes are negative) | `if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%`; reproduced: `-1073741819` now stops the script |
+| 2 | The navmesh check could read navigation before its first build and lock in a FAIL | Every check is retried until it passes or the run times out |
+| 3 | The navmesh check could never run if the build took longer than the camera's 4 s approach | The check no longer depends on the camera |
+| 4 | The carve check could run before the new props' deferred octree registration | Retried until it passes (and still waits for 2 idle frames) |
+| 5 | The projection's ±200 cm vertical extent could find navmesh on top of a prop | Query 10 cm above the floor, ±20 cm |
+| 6 | A failed graph left a deferred, unfinished cell actor in the world | Graph first; `Destroy()` on a failed `Configure` |
+| 7 | A set-up failure skipped the summary line | `FinishChecks` logs the summary on every path |
+| 8 | A failed radius write left the override on with the unlimited default | `Configure` returns `false`; the override is set only if both writes succeeded |
+| 9 | `-Key=Value` arguments were split by batch | Game arguments are one quoted string (`%~3`); tested |
+| 10 | 05/06/04 didn't cover the new files | `05` Part B, `06` §7–16, `04` §7–15 |
+
+**Simplify pass** (four angles, done by hand: this project runs no sub-agents), 6 changes, none changing behaviour: one `GetGeneratedComponents` helper instead of two copies of the tag filter (reuse); one `GetNavigation` lookup instead of three (reuse); `enum class EVerdict` instead of `0/1/-1` (simplification); `AllChecksPassed()` used instead of a duplicate expression; the unreachable "PENDING" text removed; the floor-scale expression named once. Efficiency: nothing material (the per-frame retries stop at the first pass and only run in the spike). Altitude: the fixes sit at the right depth (forced exit only on failure because Windows drops the code; reflection because the members are protected; config to remove the crowd manager).

@@ -113,7 +113,7 @@
 | Feature | Label in 5.8.4 | Used here? | Evidence |
 |---|---|---|---|
 | PCG framework (plugin `PCG`), CPU graph execution | **Production-Ready** (since 5.7); no plugin flag; enabled by default | yes | `PCG.uplugin:13–15`; Epic 5.7 announcement |
-| Runtime generation scheduler, Create Points Grid, Transform Points, CPU Static Mesh Spawner | no Beta/Experimental label found in the code or docs read | yes | source headers (no marker) |
+| Runtime generation scheduler, Volume Sampler, Transform Points, CPU Static Mesh Spawner | no Beta/Experimental label found in the code or docs read | yes | source headers (no marker) |
 | GPU processing | **Beta** | no | Epic GPU docs |
 | GPU Static Mesh Spawner | **Experimental** | no | Epic GPU docs |
 | Actor/componentless runtime generation | **Experimental** | no | `PCGComponent.h:849`; `PCGGraph.h:805` |
@@ -135,7 +135,7 @@ Details and line numbers: [Phase2_Raw_Notes/A_pcg_runtime.md](Phase2_Raw_Notes/A
 
 ## 9. Carried into Phase 3
 
-- Cells: one `GenerateAtRuntime` PCG component per cell actor; graph built in code (Create Points Grid → Transform Points → Static Mesh Spawner, collision `BlockAll`, navigation flag per configuration).
+- Cells: one `GenerateAtRuntime` PCG component per cell actor; graph built in code (Volume Sampler → Transform Points → Static Mesh Spawner, S1 having found Create Points Grid unusable from code; collision `BlockAll`, navigation flag per configuration).
 - Pipeline: commit per cell (`SetCanEverAffectNavigation(true)`), at most `nr.CommitsPerFrame` per frame; per-cell readiness predicate (finding 6 + the ≥ 1 navigation tick rule); content hash; AI-ready event.
 - Baselines: B0 uncoordinated, B1 lock + default release, B2 lock + `NoRebuild`, B3 global readiness gate.
 - S1 spike for the runtime-spawned world (finding 8), with the editor-commandlet map as the fallback.

@@ -11,7 +11,9 @@ public class NavReadyPCG : ModuleRules
 
 		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine" });
 
-		// Private: no public header of this module includes a plugin header yet (Phase 4 has no classes).
-		PrivateDependencyModuleNames.AddRange(new string[] { "NavReadyPCGCore" });
+		// Private: the public headers only forward-declare PCG and navigation types, so only .cpp files need these include paths.
+		// PCG: cell actors, the code-built graph and the PCG world actor (S1). NavigationSystem: the arena's navigation bounds and
+		// path queries (S1). NavReadyPCGCore: no class uses it yet; it stays private until a public header includes one of its headers.
+		PrivateDependencyModuleNames.AddRange(new string[] { "NavReadyPCGCore", "PCG", "NavigationSystem" });
 	}
 }

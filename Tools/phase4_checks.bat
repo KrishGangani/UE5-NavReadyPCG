@@ -6,12 +6,18 @@ rem Usage (through the queue): python -I -u tools\ue_queue.py run --project P08 
 setlocal
 set "HERE=%~dp0"
 
-call :step F-1 "%HERE%build.bat" NavReadyPCGEditor Development || exit /b
-call :step F-2 "%HERE%build.bat" NavReadyPCG Development || exit /b
-call :step F-3 "%HERE%smoke_game.bat" || exit /b
-call :step F-4 "%HERE%package.bat" Development || exit /b
-call :step F-5 "%HERE%smoke_packaged.bat" nullrhi || exit /b
-call :step F-6 "%HERE%smoke_packaged.bat" gpu || exit /b
+call :step F-1 "%HERE%build.bat" NavReadyPCGEditor Development
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+call :step F-2 "%HERE%build.bat" NavReadyPCG Development
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+call :step F-3 "%HERE%smoke_game.bat"
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+call :step F-4 "%HERE%package.bat" Development
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+call :step F-5 "%HERE%smoke_packaged.bat" nullrhi
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+call :step F-6 "%HERE%smoke_packaged.bat" gpu
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 echo [phase4] all checks passed
 exit /b 0
 

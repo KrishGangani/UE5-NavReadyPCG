@@ -2,7 +2,7 @@
 
 **Rule:** only the language ideas this project's files actually rely on, each with a tiny example first and then where it appears in our code. This file grows with every implementation step.
 
-**State (Phase 4):** the project has two C++ files of one meaningful line each, plus C# build rules, JSON descriptors and INI configuration. So this first version covers how those pieces are read. C++ classes, pointers, templates and the rest arrive with S1–S5.
+**State (S1):** sections 1–6 cover the Phase 4 files (module entry points, C# build rules, descriptors, INI). Sections 7–15 cover the C++ the S1 world spike uses.
 
 ---
 
@@ -66,3 +66,94 @@ public class NavReadyPCG : ModuleRules                   // a class deriving fro
 - **JSON** (`.uproject`, `.uplugin`): `{ }` is an object of `"key": value` pairs, `[ ]` is a list. Strings are in double quotes; `true`/`false` are booleans. A trailing comma after the last item is an error in strict JSON, so the files avoid it.
 - **INI** (`Config\Default*.ini`): `[Section]` names a class (for example `[/Script/Engine.InputSettings]`) or a settings group (`[SystemSettings]`); `Key=Value` sets a property; `;` starts a comment. For **array** properties, `+Key=Value` adds an element and `-Key=Value` removes one. That is why `DefaultEngine.ini` has `-D3D12TargetedShaderFormats=PCD3D_SM5` followed by `+D3D12TargetedShaderFormats=PCD3D_SM6`: remove SM5 from the list the engine's base config provides, then add SM6.
 - **Layering:** the engine reads `Engine\Config\Base*.ini` first, then the project's `Default*.ini` on top. A project file only needs the keys it changes. Our files also restate a few defaults on purpose (`05` A7).
+
+---
+
+## Added in step S1
+
+## 7. Namespaces and named constants
+
+```cpp
+namespace NRBench
+{
+	constexpr double ArenaHalfSize = 10000.0;        // known at compile time
+	const FVector ArenaCenter(100000.0, 0.0, 0.0);  // FVector isn't constexpr-constructible here, so plain const
+}
+double Half = NRBench::ArenaHalfSize;
+```
+- A **namespace** groups names so they can't clash with others (`NRBench::ArenaHalfSize` vs any other `ArenaHalfSize`).
+- **`constexpr`** means "computed at compile time"; **`const`** means "never changes after initialisation". Both replace magic numbers with a name and a comment saying why the value is what it is.
+- **In our code:** every tunable of the S1 spike lives in `namespace NRBench` at the top of `NRBenchmarkSubsystem.cpp`; the graph builder is `namespace NRGraphFactory`.
+
+## 8. References as output parameters
+
+```cpp
+bool TryDivide(int A, int B, int& OutResult) { if (B == 0) return false; OutResult = A / B; return true; }
+int R; if (TryDivide(7, 2, R)) { /* R == 3 */ }
+```
+- A **reference** (`int&`) is another name for an existing variable: writing to it writes the caller's variable. It can't be null, unlike a pointer.
+- Unreal names such parameters `Out…`. A reference **to a pointer** (`UPCGVolumeSamplerSettings*&`) lets a function hand back a pointer.
+- **In our code:** `AddNodeOfType<T>(T*& OutSettings)`, `CheckArenaPath(FString& OutDetail)`, `GetNavigation(World, UNavigationSystemV1*& OutNavSys)`.
+
+## 9. `const` member functions and `const` locals
+
+```cpp
+struct FCell { FBox Box; FBox GetBounds() const { return Box; } };  // promises not to modify the object
+const FBox Bounds = Cell.GetBounds();                               // this local never changes
+```
+- A `const` member function can be called on a `const` object and can't change its members. The compiler enforces it.
+- **In our code:** `GetCellBounds() const`, `GetGeneratedComponents(...) const`, `CheckArenaPath(...) const`, `AllChecksPassed() const`.
+
+## 10. `enum class`
+
+```cpp
+enum class EVerdict : uint8 { Pending, Pass, Fail };
+EVerdict V = EVerdict::Pending;     // must be qualified; doesn't convert to int silently
+```
+- Named states instead of magic integers (the first S1 draft used `0 / 1 / -1`). `: uint8` fixes the storage size at one byte.
+- **In our code:** the three spike checks' verdicts.
+
+## 11. Lambdas
+
+```cpp
+TArray<int32> Numbers = {1, 2, 3, 4};
+Numbers.RemoveAll([](int32 N) { return N % 2 == 0; });   // keeps 1 and 3
+```
+- A **lambda** is an unnamed function written in place. `[]` lists what it captures from the surrounding scope (nothing here), `(int32 N)` its parameters.
+- **In our code:** `ANRCellActor::GetGeneratedComponents` removes components without PCG's tag with `RemoveAll` and a lambda.
+
+## 12. Range-based `for`, including over a braced list
+
+```cpp
+for (int32* Value : { &A, &B, &C }) { *Value = 0; }
+```
+- `for (Element : Container)` visits every element. A braced list `{ … }` becomes a temporary `std::initializer_list`, handy for "do the same to these three variables".
+- **In our code:** `FinishChecks` turns every still-pending verdict into a failure with one loop over `{ &NavVerdict, &GenerationVerdict, &CarveVerdict }`.
+
+## 13. `static` local variables
+
+```cpp
+const FName& LabelName() { static const FName Name(TEXT("PerQualityLevelFloat")); return Name; }
+```
+- A `static` local is created the first time the line runs and kept for the program's lifetime. Creating an `FName` from text looks it up in a global table, so doing it once is cheaper than every call.
+- **In our code:** `SetRadiiMember`'s `PerQualityLevelFloatName`.
+
+## 14. Short-circuit `&&` and `||`
+
+```cpp
+if (Ptr && Ptr->IsValid()) { … }            // the right side runs only if Ptr isn't null
+if (!BuildArena(W) || !SpawnTestCell(W)) {…} // SpawnTestCell runs only if BuildArena succeeded
+```
+- `&&` stops at the first `false`, `||` at the first `true`. That makes "check, then use" safe in one expression, and orders steps that depend on each other.
+- **In our code:** the set-up in `OnWorldBeginPlay`, `bRadiiSet` in `Configure`, the null checks before every navigation query.
+
+## 15. Forward declarations vs includes
+
+```cpp
+class UPCGGraph;                       // "a class with this name exists": enough for pointers and references
+void Use(UPCGGraphInterface* Graph);
+Use(MyGraph);                          // error unless the compiler has seen that UPCGGraph derives from UPCGGraphInterface
+```
+- A **forward declaration** keeps headers light: anything that only stores or passes a pointer doesn't need the full class.
+- Anything that needs the class's **layout or inheritance** (calling a member, converting to a base class) needs its header.
+- **In our code:** headers forward-declare `UPCGComponent`, `UPCGGraph`, `ACameraActor`; `NRCellActor.cpp` includes `PCGGraph.h` because `SetGraphLocal(UPCGGraphInterface*)` needs the `UPCGGraph` → `UPCGGraphInterface` conversion (S1's first build failed with `error C2664` without it).
